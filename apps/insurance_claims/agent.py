@@ -50,6 +50,7 @@ from .verification import PII_FIELDS, REQUIRED_MATCHES
 # deadline of 2026-03-18). The demo clock defaults to a date inside that
 # window so deadlines read sensibly. Set SOP_TODAY=real to use the system date.
 DEFAULT_DEMO_DATE = date(2026, 3, 5)
+MAX_INPUT_CHARS = 2000  # one caller message; the API rejects longer ones
 
 
 def clock_from_env() -> Callable[[], date]:
@@ -68,7 +69,7 @@ def clock_from_env() -> Callable[[], date]:
 @dataclass
 class AgentConfig:
     clock: Callable[[], date] | None = None
-    max_input_chars: int = 2000
+    max_input_chars: int = MAX_INPUT_CHARS
     max_traces: int = 60
 
 

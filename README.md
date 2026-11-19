@@ -13,6 +13,10 @@ The workflow is code. A language model reads what the caller said and words the 
 
 ## Quick start
 
+```bash
+git clone <this repository> && cd sop-guided-conversational-agent
+```
+
 ### Docker
 
 ```bash
@@ -23,13 +27,15 @@ docker run --rm -p 8000:8000 -e ANTHROPIC_API_KEY=sk-ant-... sop-agent
 
 Open http://localhost:8000.
 
-### Python 3.10+
+### Python 3.11 or newer (tested on 3.12)
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ANTHROPIC_API_KEY=sk-ant-... .venv/bin/uvicorn server.app:app --port 8000
 ```
+
+Open http://localhost:8000. Leave `ANTHROPIC_API_KEY` out to start without a token.
 
 ### The API token
 
@@ -43,7 +49,7 @@ The default model is `claude-opus-5-5` at low effort. Each turn makes two model 
 
 ### No token
 
-Everything also runs without a token. Leave the field empty and the agent uses its offline engine: rule-based understanding and template replies, driven by the same SOP policy. This is how the test suite runs. It handles common phrasings, which is narrower than what the model handles.
+Everything also runs without a token. Leave the field empty and the agent uses its offline engine: rule-based understanding and template replies, driven by the same SOP policy. This is how the test suite runs. It handles common phrasings, which is narrower than what the model handles. It is built to fail safe: an email, a transfer, a change of claim or a counted identity attempt is read only from unambiguous wording, and an unclear message is asked about again.
 
 ## Try it
 
@@ -85,7 +91,7 @@ David Chen is listed as Margaret Chen's authorized representative. The fixtures 
 
 | Expected | What happens | Where to see it |
 |---|---|---|
-| Extracts identity and verifies | Name, date of birth and SSN last four match one record. Three of five is the rule | Safety gates panel |
+| Extracts identity and verifies | Name, date of birth and SSN last four match one record. Three of five is the rule. The policy number helps find the record and does not count as one of the three | Safety gates panel |
 | No claim detail before verification | Until the gate opens, no claim tool is allowed and the reply writer receives no claim data | "Facts the reply was allowed to use" in the Last turn panel |
 | Remembers the hint | Intent and "denied healthcare claim from January" are stored while still in VERIFY_ID | Memory panel, tagged with the phase and turn where it was heard |
 | Uses the hint after verification | RESOLVE_INTENT filters Margaret's four claims down to CL-2048 without asking | Phase path `VERIFY_ID -> RESOLVE_INTENT -> PROCESS_CASE`, and "Memory used" |
@@ -118,7 +124,7 @@ The `Understanding` is a fixed structure: scope, caller role, identity values, i
 | Decision | Decided by |
 |---|---|
 | What the caller said: intent, identity values, emotion, scope | Model, constrained by a schema, then normalised in code |
-| Whether identity is verified | Code. Three of five details must match one record |
+| Whether identity is verified | Code. Three of five details must match one record. A wrong value is a failed attempt and is discarded, and three failed attempts hand the caller to a person |
 | Phase changes | Code. A phase graph with entry gates |
 | Which claim and which workflow path | Model proposes, code validates against the caller's own claims |
 | Which tools run | Code. The path fixes the tools, and each tool is limited to certain phases |
@@ -130,9 +136,9 @@ The `Understanding` is a fixed structure: scope, caller role, identity values, i
 
 | Phase | The model is free to | Enforced in code |
 |---|---|---|
-| VERIFY_ID (strict) | Talk naturally, answer "why do you need this", handle partial answers, refusals and alternate identity fields | No claim tool is allowed in this phase, so no claim data exists in the turn. The gate opens in one function, on three matching details |
+| VERIFY_ID (strict) | Talk naturally, answer "why do you need this", "which three?" or "can I use my address instead?", handle partial answers, refusals and alternate identity fields | No claim tool is allowed in this phase, so no claim data exists in the turn. The gate opens in one function, on three matching details |
 | RESOLVE_INTENT (guided) | Turn messy language into one of six intents and a choice of claim | The choice must be one of the verified caller's claims. Ambiguity leads to a question, a mismatch to a list of what is on file |
-| PROCESS_CASE (flexible) | Answer follow-up questions in its own words, from the facts | The intent picks a path, the path picks the tools. Every claim number, amount and date in the reply must appear in the facts |
+| PROCESS_CASE (flexible) | Answer follow-up questions in its own words, from the facts | The intent picks a path, the path picks the tools. A message that asks two things takes both paths. Every claim number, amount and date in the reply must appear in the facts. A request no path covers gets an offer of a human representative |
 | POST_PROCESS (strict) | Word the offer and the goodbye | The email goes out only on an explicit choice, only to the address on file, and its content is composed in code |
 
 Non-disclosure before verification does not depend on the model following an instruction. The data is not in the prompt. `tests/test_llm_path.py` asserts this on the exact text sent to the model.
@@ -141,11 +147,13 @@ Non-disclosure before verification does not depend on the model following an ins
 
 Every turn fills memory slots whatever the current phase: identity values, role, intent, claim hints, the question asked, follow-up topics, the email preference, and free-form notes. A slot that belongs to a later phase waits there. The inspector shows where each slot was heard ("heard in VERIFY_ID, turn 1") and when it was used.
 
-Examples: a caller who says "it's about my auto claim, and email me a summary at the end" during verification is taken straight to the auto claim once verified, and is later asked to confirm the summary they already requested.
+Examples: a caller who says "it's about my auto claim, and email me a summary at the end" during verification is taken straight to the auto claim once verified, and is later asked to confirm the summary they already requested. A second question asked while the first is still waiting is added to it, and both are answered after verification.
 
 ### Scope
 
-Each message is read as in scope, out of scope or mixed. Out-of-scope requests ("What is RL?") are declined politely and the caller is steered back to the current step. The phase does not change. On the third in a row the agent offers a human representative, and on the fourth it transfers. An in-scope message resets the count.
+Each message is read as in scope, out of scope or mixed. Out-of-scope requests ("What is RL?") are declined politely, in fixed wording, and the caller is steered back to the current step. The phase does not change. When the count reaches three the agent offers a human representative, and at four it transfers. A relevant message takes one off the count. It does not reset it, so slipping one relevant line between unrelated questions does not start the count again.
+
+A question about the step itself is in scope: before verification, "what do you mean?" or "what happens if I get it wrong?" is answered and never counted.
 
 ### Emotional support and SOP recovery (bonus)
 
@@ -154,10 +162,11 @@ Each message is read as in scope, out of scope or mixed. Out-of-scope requests (
 - A second pushback adds the offer of a human representative. A third stops the persuasion and transfers.
 - "I don't have my SSN on me" is treated as a declined field. The agent offers the other fields.
 - Giving details while upset counts as progress.
-- A clear request for a human is honoured immediately in any phase. Several upset turns in a row after verification bring a proactive offer.
+- A clear request for a human is honoured immediately in any phase. Mentioning a person ("was this decided by an actual person?") or saying "don't transfer me" is not a request.
+- After verification, a confused caller who asks nothing specific gets the explanation again and is asked which part to go over. An upset caller who asks nothing is asked what was missed, and after three such turns is asked whether they would like a person.
 - Every transfer creates a ticket with what is known so far, so the caller does not repeat themselves. The ticket states whether identity was verified.
 
-For the example in the brief ("I already told you who I am. This is ridiculous. Just tell me why my claim was denied."), the offline engine answers:
+For the example in the brief ("I already told you who I am. This is ridiculous. Just tell me why my claim was denied."), said by a caller who has so far given only a name, the offline engine answers:
 
 > I understand you're upset, and I'm sorry for the trouble this has caused you. You're right that you've given me your full name, thank you. Your claim file holds private health and financial information, so I have to confirm it's really you before I can share anything from it, including the reason for a decision. It only takes a moment. I need two more details to finish. You can choose from your date of birth, the phone number on your policy, the email address on your policy, or the last four digits of your SSN or national ID.
 
@@ -165,17 +174,21 @@ The question about the denial is saved and answered as soon as verification comp
 
 ### Representative callers and consent
 
-Someone calling for a policyholder has to pass three checks: the policyholder's details match, the caller is listed as an authorized representative, and the policyholder approves a consent request. The consent status comes from `consent_scenarios.json` (choose `default` or `timeout` in the UI before starting a conversation). Until consent is approved the session stays in VERIFY_ID.
+Someone calling for a policyholder has to pass three checks: the policyholder's details match, the caller is listed as an authorized representative, and the policyholder approves a consent request. The consent status comes from `consent_scenarios.json` (choose `default` or `timeout` in the UI before starting a conversation). Until consent is approved the session stays in VERIFY_ID. A request that expires is not sent again: the caller is offered a person, and then handed to one.
+
+This gate depends on what the caller says about themselves ("I'm her husband", "I'm calling for Margaret Chen"). Someone who presents three correct details as their own is treated as the policyholder, as the three-detail rule says. A caller verified as the policyholder who later says they are acting for someone else is handed to a person.
 
 ### Output guard
 
-A model reply is released only if:
+The first protection is structural: the model is given no record data before verification, and only the tool results of the current path after it. The guard is a second check on what the model wrote. A reply is released only if:
 
-- every claim number, policy number, email address, phone number, amount and date in it appears in the turn's facts or was said by the caller
+- every claim number, policy number, email address, phone number, dollar amount, date and count of days in it is grounded. Grounded means it appears in this turn's facts, was said by the caller, or was in the facts of an earlier turn after verification. An amount may also be the sum or difference of two grounded amounts
 - it contains no value held only in the records (identity numbers, other people's names, denial reasons, requested documents)
-- it does not say the caller is verified, that something was sent, or that a transfer happened, unless the workflow reached that point
+- before verification, it does not say the caller is verified, that it can see a record, or what the status of a claim is
+- it does not say that something was sent or that a transfer happened unless the workflow did that in this turn
+- it does not promise an outcome ("it will be approved") or offer an action the assistant cannot take ("I can expedite that")
 
-Otherwise the deterministic reply is sent and the rejection is shown in the inspector.
+Otherwise the deterministic reply is sent and the rejection is shown in the inspector. The guard works on patterns. It covers the usual ways of writing these things, not every possible paraphrase, which is why it is the second line and not the first.
 
 ## Configuration
 
@@ -188,7 +201,7 @@ Otherwise the deterministic reply is sent and the rejection is shown in the insp
 | `SOP_INSPECTOR` | `on` | `off` removes harness internals from API responses |
 | `PORT` | `8000` | Port inside the container |
 
-SOP limits live in `apps/insurance_claims/sop/common.py`: three failed identity attempts, two rounds of persuasion, a human offered at three out-of-scope messages and a transfer at four.
+SOP limits live in `apps/insurance_claims/sop/common.py`: three failed identity attempts, three names that match no policy before a name counts as a failed attempt, two rounds of persuasion, a human offered at three out-of-scope messages and a transfer at four. One caller message is at most 2000 characters.
 
 ## Project layout
 
@@ -204,8 +217,12 @@ apps/insurance_claims/
   sop/process_case.py        phase 3 and the workflow paths
   sop/post_process.py        phase 4
   sop/common.py              limits, wording, hand-off, scope control
+  state.py                   session state and the memory slots
+  data.py                    read-only access to the sample records
   verification.py            three-of-five identity matching
+  normalize.py               names, dates, phone numbers, SSN redaction
   tools.py                   claim, consent, email and hand-off tools
+  guidance.py                document follow-up guidance from the fixtures
   understanding.py           the Understanding structure and its JSON schema
   nlu_llm.py, nlg.py         prompts for the two model calls
   nlu_rules.py               offline understanding
@@ -216,7 +233,7 @@ server/app.py                FastAPI app
 server/static/index.html     test UI
 scripts/demo.py              scripted conversations in the terminal, offline
 scripts/live_check.py        the same conversations against the real model, with a spending cap
-tests/                       168 tests, all offline
+tests/                       407 tests, all offline
 ```
 
 ## Tests
@@ -228,7 +245,7 @@ tests/                       168 tests, all offline
 
 The suite is offline. It never reads `.env` and removes any token from the environment, so it cannot spend money.
 
-The suite covers the demo case, the verification gate, the bonus scenarios, scope control, claim resolution, the workflow paths, the email step, representative consent, harness enforcement (tool gating, illegal transitions), the output guard against leaking or overclaiming model replies, and the shape of the request sent to the Anthropic API.
+The suite covers the demo case, the verification gate, the bonus scenarios, scope control, claim resolution, the workflow paths, the email step, representative consent, harness enforcement (tool gating, illegal transitions), the output guard against leaking or overclaiming model replies, and the shape of the request sent to the Anthropic API. `tests/test_review_findings.py` holds one regression test for each problem found by the code review before submission. `ruff check .` passes with the configuration in `ruff.toml`.
 
 ## Checked against the live model
 
@@ -257,7 +274,9 @@ The Docker image was built and run: the container passes its health check, serve
 
 ## Limits
 
-- A safety classifier can decline a request on some models. For those models the client opts into the API's server-side fallback (`fallbacks: "default"`), and drops the option on its own if the account does not have it. If any model call fails, that turn runs on the offline engine and the UI says so.
-- The offline engine is English only and rule-based.
+- A safety classifier can decline a request on some models. For those models the client opts into the API's server-side fallback (`fallbacks: "default"`), and drops the option on its own if the account does not have it. If a model call fails in any way, that turn is completed by the offline engine and the UI says so.
+- The offline engine is English only and rule-based. It answers what its rules recognise and asks again otherwise.
+- The limit on failed identity attempts is per conversation. A new conversation starts a new count, and limiting attempts across conversations would need caller identification that this demo does not have.
+- A policyholder is told which of their details matched ("I've confirmed your full name"), which makes verification easier to complete and also tells a guesser which values were right. A representative is not told. Wrong values are limited by the attempt count.
 - Sessions live in memory. Email delivery is simulated: the message appears in the Outbox panel.
 - There is no hosted instance. The image runs on any container host and honours `PORT`.

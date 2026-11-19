@@ -71,9 +71,9 @@ def assert_no_leak(reply: str, allow: tuple[str, ...] = ()) -> None:
 
 @pytest.fixture(autouse=True)
 def _no_real_token(monkeypatch):
-    """No test may see an API token, whatever the developer's shell has set."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    """No test may see an API token or a setting from the developer's shell."""
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "SOP_MODEL", "SOP_EFFORT", "SOP_TODAY", "SOP_INSPECTOR"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

@@ -25,12 +25,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from apps.insurance_claims import Agent
+from apps.insurance_claims.agent import MAX_INPUT_CHARS
 from apps.insurance_claims.state import Session
 from sop_harness.llm import (
     DEFAULT_MODEL,
@@ -137,9 +139,24 @@ class NewSession(BaseModel):
 
 class ChatMessage(BaseModel):
     session_id: str = Field(max_length=64)
-    message: str = Field(min_length=1, max_length=4000)
+    message: str = Field(min_length=1, max_length=MAX_INPUT_CHARS)
     engine: str = Field(default="auto", pattern="^(auto|offline)$")
     model: str | None = Field(default=None, max_length=80)
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    """One readable sentence instead of a list of validation records."""
+    problems = []
+    for error in exc.errors():
+        field = str(error.get("loc", ["request"])[-1])
+        if field == "message" and error.get("type") == "string_too_long":
+            problems.append(f"The message is longer than {MAX_INPUT_CHARS} characters.")
+        elif field == "message":
+            problems.append("The message is empty.")
+        else:
+            problems.append(f"{field}: {error.get('msg', 'invalid value')}.")
+    return JSONResponse(status_code=422, content={"detail": " ".join(dict.fromkeys(problems)) or "Invalid request."})
 
 
 @app.get("/healthz")
@@ -153,7 +170,7 @@ def config() -> dict[str, Any]:
     default = _default_model()
     if default not in models:
         models.insert(0, default)
-    return {
+    out: dict[str, Any] = {
         "server_token_configured": bool(_server_key()),
         "default_model": default,
         "models": models,
@@ -161,8 +178,11 @@ def config() -> dict[str, Any]:
         "today": agent.clock().isoformat(),
         "consent_scenarios": sorted(agent.data.consent_scenarios),
         "inspector": _inspector_on(),
-        "tools": agent.tools.describe(),
+        "max_message_chars": MAX_INPUT_CHARS,
     }
+    if _inspector_on():
+        out["tools"] = agent.tools.describe()  # harness internals, hidden with the inspector
+    return out
 
 
 @app.post("/api/session")
@@ -202,7 +222,13 @@ def chat(body: ChatMessage, x_api_key: str | None = Header(default=None)) -> dic
     notice = ""
     if trace["llm_errors"]:
         first = trace["llm_errors"][0]
-        notice = f"Model call failed ({first['kind']}): {first['message']} This turn ran on the offline engine."
+        if first["stage"] == "understand":
+            notice = f"Model call failed ({first['kind']}): {first['message']} This turn ran on the offline engine."
+        else:
+            notice = (
+                f"Model call failed while wording the reply ({first['kind']}): {first['message']} "
+                "The reply for this turn is the built-in wording."
+            )
     elif body.engine == "auto" and not token:
         notice = "No API token is set, so this turn ran on the offline rule engine."
     out: dict[str, Any] = {"reply": result["reply"], "state": state, "engine": trace["engine"], "notice": notice}

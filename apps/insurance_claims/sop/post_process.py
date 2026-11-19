@@ -107,9 +107,9 @@ class PostProcessPhase(PolicyBase):
                 s, t, "EMAIL_OFFER",
                 goal="The claim questions are done. Offer the email summary and let the customer choose to send or skip it.",
                 fallback=(
-                    f"Before we wrap up, would you like me to email you {again} of today's conversation? It "
-                    f"covers what we discussed, the claim status and the next steps, and it would go to "
-                    f"{target}. I can send it or we can skip it, whichever you prefer."
+                    f"Before we wrap up, would you like me to email {'' if self._is_rep(s) else 'you '}{again} of "
+                    f"today's conversation? It covers what we discussed, the claim status and the next steps, and "
+                    f"it would go to {target}. I can send it or we can skip it, whichever you prefer."
                 ),
                 facts=offer_facts,
                 cover=["Offer the email summary.", "Say what it contains and where it would go.", "Make clear they can choose to send it or skip it."],

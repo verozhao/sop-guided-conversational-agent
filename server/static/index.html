@@ -75,6 +75,8 @@
   .step.done .n { color: var(--good); }
   .step.active { border-color: var(--accent); background: var(--accent-soft); }
   .step.active .n { color: var(--accent); }
+  .step.halt { border-color: rgba(235,87,87,.45); }
+  .step.halt .n { color: var(--bad, #eb5757); }
   .badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
   .tag { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--raised); color: var(--muted); }
   .tag.good { color: var(--good); background: var(--good-soft); border-color: rgba(111,207,151,.3); }
@@ -133,7 +135,7 @@
       <span id="script-preview" class="next"></span>
     </div>
     <form id="composer" class="composer">
-      <textarea id="input" placeholder="Type as the caller. Enter to send, Shift+Enter for a new line." autocomplete="off"></textarea>
+      <textarea id="input" maxlength="2000" placeholder="Type as the caller. Enter to send, Shift+Enter for a new line." autocomplete="off"></textarea>
       <button id="send" class="btn primary" type="submit">Send</button>
     </form>
   </section>
@@ -314,6 +316,7 @@
     app.busy = busy;
     $("send").disabled = busy;
     $("new-btn").disabled = busy;
+    $("script").disabled = busy;
     updateScriptControls();
   }
 
@@ -344,8 +347,8 @@
 
   async function send(text) {
     const message = (text || "").trim();
-    if (!message || app.busy) return;
-    if (!app.sessionId) { await newConversation(); if (!app.sessionId) return; }
+    if (!message || app.busy) return false;
+    if (!app.sessionId) { await newConversation(); if (!app.sessionId) return false; }
     addMessage("caller", message);
     setBusy(true);
     const typing = addMessage("agent typing", "…");
@@ -373,9 +376,11 @@
       renderState(data.state);
       if (trace) renderTrace(trace);
       setEnginePill(data.engine);
+      return true;
     } catch (error) {
       typing.remove();
-      addNote(error.status === 404 ? error.message : "Something went wrong: " + error.message, true);
+      addNote(error.status === 404 || error.status === 422 ? error.message : "Something went wrong: " + error.message, true);
+      return false;
     } finally {
       setBusy(false);
       $("input").focus();
@@ -422,7 +427,8 @@
       current = workflow.indexOf(state.handoff.phase_at_handoff);
     }
     workflow.forEach(function (phase, index) {
-      const cls = index < current ? "done" : index === current && !terminal ? "active" : index === current ? "done" : "";
+      const stopped = state.phase === "ESCALATED" && index === current;
+      const cls = stopped ? "halt" : index < current ? "done" : index === current && !terminal ? "active" : index === current ? "done" : "";
       steps.append(h("div", { class: "step " + cls },
         h("div", { class: "n", text: "0" + (index + 1) }),
         h("div", { class: "name", text: phase }),
@@ -435,6 +441,11 @@
     if (state.phase === "ESCALATED") badges.append(tag("handed to a human", "bad"));
     if (state.case_id) badges.append(tag("claim " + state.case_id, "info"));
     if (state.today) badges.append(tag("demo date " + state.today));
+    $("input").placeholder = state.phase === "ESCALATED"
+      ? "Handed to a human representative. Start a new conversation to try another scenario."
+      : state.phase === "CLOSED"
+        ? "Conversation closed. Ask another claim question to reopen it, or start a new conversation."
+        : "Type as the caller. Enter to send, Shift+Enter for a new line.";
 
     if (!state.identity) {  // inspector disabled on the server
       ["card-gates", "card-memory", "card-trace"].forEach(function (id) { $(id).classList.add("hidden"); });
@@ -590,15 +601,18 @@
       const lines = SCRIPTS[app.script] || [];
       const line = lines[app.scriptIndex];
       if (!line || app.busy) return;
-      app.scriptIndex += 1;
-      send(line);
+      send(line).then(function (ok) {
+        if (ok) app.scriptIndex += 1;
+        updateScriptControls();
+      });
     });
     $("composer").addEventListener("submit", function (event) {
       event.preventDefault();
       const input = $("input");
+      if (app.busy || !input.value.trim()) return;  // keep what was typed while a turn is running
       const text = input.value;
       input.value = "";
-      send(text);
+      send(text).then(function (ok) { if (!ok && !input.value) input.value = text; });
     });
     $("input").addEventListener("keydown", function (event) {
       if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
@@ -640,8 +654,8 @@
     if (picked && params.get("auto")) {
       const limit = Number(params.get("turns")) || SCRIPTS[picked].length;
       for (const line of SCRIPTS[picked].slice(0, limit)) {
+        if (!(await send(line))) break;
         app.scriptIndex += 1;
-        await send(line);
       }
     }
     updateScriptControls();
