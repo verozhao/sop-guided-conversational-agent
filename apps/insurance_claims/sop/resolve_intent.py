@@ -46,6 +46,7 @@ class ResolveIntentPhase(PolicyBase):
                 self.graph.move(s, POST_PROCESS, "no claim to process and the caller needs nothing else", t.trace)
                 return None
             s.pending = "human_offer"
+            s.offer_reason = "dead_end"
             return self._directive(
                 s, t, "NO_CLAIMS",
                 goal="There are no claims on the caller's policy. Say so and ask whether they would like a human representative.",
@@ -67,9 +68,26 @@ class ResolveIntentPhase(PolicyBase):
         picked = bool(u.selected_case_id or t.turn_hints)
         if not t.entered and s.pending == "choose_case" and not picked:
             s.unresolved_asks += 1
-            if u.affirmation == "no" or s.unresolved_asks >= 2 or NOT_LISTED.search(t.text):
+            said_so = u.affirmation == "no" or bool(NOT_LISTED.search(t.text))
+            if not said_so and s.unresolved_asks >= 3:
+                # Three answers that pointed at nothing: the caller never said it is not on file.
                 s.unresolved_asks = 0
                 s.pending = "human_offer"
+                s.offer_reason = "unclear"
+                return self._directive(
+                    s, t, "CLAIM_UNCLEAR",
+                    goal="After several tries it is still unclear which claim the caller means. Say so without blaming them and ask whether they would like a human representative.",
+                    fallback=(
+                        "I'm sorry, I haven't been able to work out which claim you mean. A human representative "
+                        "can look at it with you. Would you like me to connect you?"
+                    ),
+                    facts={"claims_on_file": claims},
+                    cover=["Say you could not work out which claim they mean.", "Ask one question: whether they would like a human representative."],
+                )
+            if said_so:
+                s.unresolved_asks = 0
+                s.pending = "human_offer"
+                s.offer_reason = "dead_end"
                 return self._directive(
                     s, t, "NOT_ON_FILE",
                     goal="What the caller needs is not one of the claims on file. Say you can only help with those here, and ask whether they would like a human representative.",
@@ -88,6 +106,10 @@ class ResolveIntentPhase(PolicyBase):
             s.unresolved_asks = 0
 
         by_id = {c["claim_id"]: c for c in claims}
+        if t.exclude_case and all(c["claim_id"] == t.exclude_case for c in claims):
+            # "my other claim" when there is only one: say so and stay with it
+            m.case_hints = {"claim_id": t.exclude_case}
+            t.only_claim, t.same_case, t.exclude_case = True, True, ""
         if t.exclude_case:
             claims = [c for c in claims if c["claim_id"] != t.exclude_case]
         chosen: dict[str, Any] | None = None
@@ -163,6 +185,10 @@ class ResolveIntentPhase(PolicyBase):
                 else:
                     text = f"{intro}I see {len(candidates)} claims on this policy: {listing}. Which one can I help you with?"
                     goal = "The caller has not said which claim they mean. List the claims on file and ask."
+                    if s.unresolved_asks >= 2:
+                        # Their last answers did not point at a claim. Say how to choose, before offering a person.
+                        text += " You can give me the claim number, or tell me if it's none of these."
+                        goal += " Their earlier answers did not identify one, so say they can give the claim number or say it is none of these."
                 facts: dict[str, Any] = {"matching_claims": candidates}
                 if hints:
                     facts["caller_described"] = describe_hints(hints)

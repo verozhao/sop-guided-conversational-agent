@@ -88,7 +88,7 @@ followup_topics (about documents requested for a claim)
   receipt_confirmation: how they will know the documents arrived.
 
 process_question
-  true for questions about the call itself: why verification or consent is needed, which details are accepted, whether this is a person or a bot, what happens next, what the email summary contains or where it goes.
+  true for questions about the call itself: why verification or consent is needed, which details are accepted, whether this is a person or a bot, what the assistant can do, what the email summary contains or where it goes. After verification, "what happens next?" about a claim is appeal_or_next_steps, not this.
 
 emotion
   The dominant feeling. frustrated: impatient, fed up, repeating themselves. angry: hostile, insulting, shouting. anxious: worried, scared, under pressure. confused: lost, does not understand. sad: grief or distress. neutral otherwise.

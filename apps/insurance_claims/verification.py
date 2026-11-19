@@ -62,7 +62,7 @@ def field_matches(record: Policyholder, name: str, value: str) -> bool:
     return False
 
 
-def verify_identity(data: ClaimsData, claimed: dict[str, str]) -> VerificationResult:
+def verify_identity(data: ClaimsData, claimed: dict[str, str], prefer: str | None = None) -> VerificationResult:
     """Compare what the caller has claimed so far with the records.
 
     Verified means: one record matches at least ``REQUIRED_MATCHES`` of the
@@ -101,15 +101,23 @@ def verify_identity(data: ClaimsData, claimed: dict[str, str]) -> VerificationRe
         return result
     if len(best) > 1:
         pinned = [p for p in best if p in by_policy]
-        if len(pinned) != 1:
+        earlier = [p for p in best if prefer and p.party_id == prefer]
+        if len(pinned) == 1:
+            record = pinned[0]
+        elif len(earlier) == 1:
+            # The caller's details were matching this record already. A value that belongs
+            # to somebody else is a mismatch, and what matched before still stands.
+            record = earlier[0]
+        else:
             # Ambiguous between records: more information is needed. A value that
             # matches none of the tied records is still wrong and counts as such,
             # so a tie cannot be used to guess without limit.
             result.conflicts.extend(
                 name for name, value in usable.items() if not any(field_matches(p, name, value) for p in best)
             )
+            if policy and not any(p in by_policy for p in best):
+                result.conflicts.append("policy_number")
             return result
-        record = pinned[0]
     else:
         record = best[0]
     if policy and record not in by_policy:

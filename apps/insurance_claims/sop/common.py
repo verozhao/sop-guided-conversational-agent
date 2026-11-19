@@ -88,6 +88,15 @@ PROCESS_FACTS = {
         "member ID cannot."
     ),
     "how_details_are_used": "The details are used only to confirm identity against the policy record.",
+    "policy_number": "The policy number helps find the record. It does not count as one of the three details.",
+}
+ASSISTANT_FACTS = {
+    "what_the_assistant_can_do": (
+        "Explain where a claim stands, why a decision was made, which documents are needed and how to send "
+        "them, the appeal steps and deadline, and the payment amounts. Send an email summary at the end. "
+        "Connect the caller with a human representative."
+    ),
+    "what_it_cannot_do": "Change, approve, reopen or file a claim, or change details on the policy. A human representative does that.",
 }
 CONSENT_FACTS = {
     "why_consent_is_required": (
@@ -195,6 +204,7 @@ class TurnCtx:
     exclude_case: str = ""           # "the other claim": anything but this one
     uncovered: bool = False          # the question maps to no workflow path
     reexplain: bool = False          # the caller is lost: go over the claim again
+    only_claim: bool = False         # they asked for "the other claim" and there is none
     declined_human: bool = False     # the caller just said no to an offered human
     mixed_scope: bool = False
     tone: str = ""
@@ -372,11 +382,17 @@ class PolicyBase:
                 "The claim belongs to the policyholder, so I can only share details with someone else once "
                 "they've approved it. It protects their private information."
             )
-        asks_why = re.search(r"\bwhy\b|what\s+for\b|safe|secure|trust|scam|legit|have\s+to|necessary|required", low)
+        if not s.verified and s.pending == "rep_name":
+            return "Only a representative who is listed on the policy can be approved, so I need your own name to check that."
+        asks_why = re.search(r"\bwhy\b|what\s+for\b|this\s+for\b|the\s+point\b|how\s+come\b|\breason\b", low)
         if not s.verified and not asks_why:
             # Clarifications about the step itself get their own answer, not the reason for it.
-            if re.search(r"\bare\s+you\s+(?:still\s+)?(?:there|listening)\b", low):
+            if re.search(r"\bare\s+you\s+(?:still\s+)?(?:there|listening)\b|\bhear\s+me\b|\banyone\s+there\b", low):
                 return "Yes, I'm still here."
+            if re.search(r"\bhow\s+long\b", low):
+                return "It only takes two or three short answers."
+            if re.search(r"\bpolicy\s+number\b", low):
+                return "The policy number helps me find the record, but it doesn't count as one of the three details."
             if re.search(r"\b(?:minute|moment|sec|second)\b|\b(?:hold|hang)\s+on\b|bear\s+with|let\s+me\s+(?:check|find|look|grab|get)", low):
                 return "No rush, take your time."
             if re.search(r"wrong|mistake|incorrect|(?:doesn't|don't|not)\s+match|attempts?|tries|locked", low):
@@ -395,7 +411,15 @@ class PolicyBase:
                 low,
             ):
                 return "I can only verify with the details on this list, so other documents or details can't be used here."
-            return "I need three details to complete verification, and you choose which ones."
+            asks_which = re.search(r"\bwhich\b|how\s+many|repeat|\bagain\b|options?|what\s+do\s+you\s+(?:need|mean)", low)
+            if asks_which or not re.search(r"safe|secure|trust|scam|legit|necessary|required|do\s+i\s+(?:really\s+)?have\s+to", low):
+                return "I need three details to complete verification, and you choose which ones."
+        if s.verified:
+            return (
+                "I can go over where a claim stands, why a decision was made, which documents are needed and how "
+                "to send them, the appeal steps and deadline, and the payment amounts. I can also connect you "
+                "with a human representative."
+            )
         return (
             "I ask because claim files hold private health and financial information, and verifying makes sure "
             "only you, or someone you've authorized, can get into yours. I never need a full SSN, only the last "
@@ -517,6 +541,7 @@ class PolicyBase:
         }
         if s.oos_streak >= OOS_OFFER_AT:
             s.pending = "human_offer"
+            s.offer_reason = "out_of_scope"
             return self._directive(
                 s, t, "OOS_OFFER_HUMAN",
                 goal="The caller keeps asking for things outside insurance claims support. Decline again and offer a human representative.",

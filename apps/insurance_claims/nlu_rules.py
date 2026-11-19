@@ -37,6 +37,14 @@ LAST4_RE = re.compile(
     r"\blast\s+(?:four|4)(?:\s+digits)?|\bending(?:\s+in)?)\D{0,40}?(?<!\d)(\d{4})(?!\d)",
     _I,
 )
+# "my husband's birthday is", "my doctor's number is": the value after it is somebody else's
+_THIRD_PARTY_RE = re.compile(
+    r"\bmy\s+(?:mother|mom|mum|father|dad|wife|husband|son|daughter|partner|spouse|brother|sister|friend|kid|child|"
+    r"doctor|dentist|lawyer|attorney|boss|employer|provider|pharmacy|clinic|hospital)(?:'s)?\s+(?:[\w']+\s+){0,4}$",
+    re.I,
+)
+# "call me back at ..." gives a number to ring, which need not be the one on the policy. "reach me at ..." is a detail.
+_CALLBACK_RE = re.compile(r"\b(?:call|text|ring|phone)\s+(?:me\s+)?back\s+(?:at|on)\s*$|\bcall-?\s?back\s+number\s+(?:is\s+)?$", re.I)
 DOB_TRIGGER_RE = re.compile(r"(dob|d\.o\.b|date\s+of\s+birth|birth\s*date|birthday|born)\W*(?:is|on|was|:)?\W*$", _I)
 
 # --------------------------------------------------------------------------- names
@@ -91,10 +99,25 @@ _RELATIVES = (
     r"grandmother|grandfather|grandma|grandpa|aunt|uncle|client|friend|neighbou?r|patient"
 )
 _ROLES = rf"(?:{_RELATIVES}|lawyer|attorney|representative|caregiver|carer|guardian|assistant|broker|accountant)"
+# The same words as a set: "my friend Jane Doe" names Jane Doe, not "Friend Jane Doe".
+_KIN = set(
+    """mother mom mum father dad wife husband son daughter partner spouse brother sister grandmother grandfather
+    grandma grandpa aunt uncle client friend neighbor neighbour patient lawyer attorney representative caregiver
+    carer guardian assistant broker accountant""".split()
+)
 
-# "Jane Doe's husband": the name belongs to the policyholder and the caller is somebody else.
-_POSSESSIVE_ROLE = re.compile(rf"((?:[A-Z][A-Za-z\-]+\s+){{0,3}}[A-Z][A-Za-z\-]+)'s\s+(?i:{_ROLES})\b")
-_CALLING_FOR = re.compile(r"\b[Cc]alling\s+(?:in\s+)?(?:for|about|regarding)\s+((?:[A-Z][A-Za-z\-]+\s+){1,2}[A-Z][A-Za-z\-]+|[A-Z][A-Za-z\-]+\s+[A-Z][A-Za-z\-]+)")
+_NAME_RUN = r"((?:[A-Za-z][A-Za-z\-]+\s+){0,3}[A-Za-z][A-Za-z\-]+)"
+_SELF = r"(?:i\s+am|i'm|im|this\s+is|it's|it\s+is)"
+# "I'm Jane Doe's husband", "Jane Doe's son here": the name is the policyholder's, the caller is somebody else.
+_POSSESSIVE_ROLE = re.compile(
+    rf"\b{_SELF}\s+{_NAME_RUN}'s\s+{_ROLES}\b|^\W*{_NAME_RUN}'s\s+{_ROLES}\s+(?:here|calling|speaking)\b", _I
+)
+# "calling for Jane Doe" in any letter case. "calling about ..." needs capitals, because a topic can follow it.
+_CALLING_FOR = re.compile(rf"\b(?:calling|phoning|ringing|asking)\s+(?:in\s+)?(?:for|on\s+behalf\s+of)\s+{_NAME_RUN}", _I)
+_CALLING_ABOUT = re.compile(r"\b[Cc]alling\s+(?:in\s+)?(?:about|regarding)\s+((?:[A-Z][A-Za-z\-]+\s+){1,2}[A-Z][A-Za-z\-]+)")
+# "I'm the caregiver for Jane Doe", "Jane Doe is my mother"
+_ROLE_FOR = re.compile(rf"\b(?:{_SELF}|as)\s+(?:(?:the|a|an|her|his|their|your)\s+)?{_ROLES}\s+(?:for|of|to)\s+{_NAME_RUN}", _I)
+_IS_MY = re.compile(rf"\b{_NAME_RUN}\s+is\s+my\s+(?:{_RELATIVES})\b", _I)
 _OTHER_NAME = re.compile(
     rf"\bmy\s+(?:{_RELATIVES})(?:'s\s+name\s+is|\s+is|,)?\s+|\bon\s+behalf\s+of\s+(?:my\s+\w+,?\s+)?|"
     rf"\b(?:her|his|their)\s+(?:full\s+)?name\s+is\s+|\bpolicyholder(?:'s\s+name)?\s+is\s+|\b{_ROLES}\s+of\s+",
@@ -106,24 +129,32 @@ REP_STRONG_RE = re.compile(
     rf"\bon\s+behalf\s+of\b|\bcalling\s+(?:in\s+)?for\s+(?:my|our|a|the|her|him|them)\b|"
     rf"\bfor\s+my\s+(?:{_RELATIVES})\b|\bi(?:'m|\s+am)\s+(?:her|his|their)\s+{_ROLES}\b|"
     rf"\bi(?:'m|\s+am)\s+the\s+{_ROLES}\s+of\b|\bpower\s+of\s+attorney\b|\bauthori[sz]ed\s+representative\b|"
-    r"\bi(?:'m|\s+am)\s+not\s+the\s+policy\s?holder\b|\b(?:her|his|their)\s+behalf\b",
+    r"\bi(?:'m|\s+am)\s+not\s+the\s+policy\s?holder\b|\b(?:her|his|their)\s+behalf\b|"
+    rf"\bthe\s+policy\s?holder'?s\s+{_ROLES}\b|\bthe\s+policy\s?holder\s+is\s+my\s+(?:{_RELATIVES})\b|"
+    rf"\b(?:this\s+is|it's)\s+(?:her|his|their)\s+{_ROLES}\b|^\W*(?:her|his|their)\s+{_ROLES}\b|"
+    r"\bnot\s+mine\b|\bnot\s+my\s+(?:own\s+)?(?:policy|claim|account)\b",
     _I,
 )
 # Weak cues: talking about somebody else's claim or details.
 REP_WEAK_RE = re.compile(
     rf"\bmy\s+(?:{_RELATIVES})'s\s+(?:\w+\s+){{0,3}}?(?:claims?|policy|account|insurance)\b|"
     rf"\bmy\s+(?:{_RELATIVES})\s+(?:(?:has|had|got|received|filed)\s+an?\b|is\s+the\s+(?:policy\s?holder|insured|member))|"
-    r"\b(?:her|his|their)\s+(?:\w+\s+){0,2}?(?:claims?|policy|date\s+of\s+birth|dob|birthday|ssn|social|phone|e-?mail|name)\b",
+    rf"\bmy\s+(?:{_RELATIVES})\s+(?:\w+\s+){{0,2}}?(?:asked|wants|wanted|needs|needed)\s+me\s+to\b|"
+    r"\b(?:her|his)\s+(?:full\s+)?(?:name|date\s+of\s+birth|dob|birthday|ssn|social|phone(?:\s+number)?|e-?mail)\b|"
+    r"\btheir\s+(?:date\s+of\s+birth|dob|birthday|ssn|social)\b|"
+    r"\b(?:about|regarding|on|for|with|check)\s+(?:her|his)\s+(?:\w+\s+){0,2}?(?:claims?|policy)\b",
     _I,
 )
 # Once the gate has opened, only an explicit statement about oneself counts.
 SELF_REP_RE = re.compile(
     rf"\bi(?:'m|\s+am)\s+(?:actually\s+|really\s+)?(?:her|his|their)\s+{_ROLES}\b|\bi(?:'m|\s+am)\s+not\s+the\s+policy\s?holder\b|"
-    r"\bcalling\s+on\s+(?:her|his|their)\s+behalf\b|\bi(?:'m|\s+am)\s+calling\s+(?:for|on\s+behalf\s+of)\s+(?:her|him|them|my)\b",
+    r"\bcalling\s+on\s+(?:her|his|their)\s+behalf\b|"
+    rf"\bi(?:'m|\s+am)\s+(?:actually\s+|really\s+|only\s+|just\s+)?calling\s+(?:for|on\s+behalf\s+of)\s+(?:her|him|them|my\s+(?:{_RELATIVES}))\b|"
+    rf"\bthis\s+is\s+(?:actually\s+)?(?:her|his|their)\s+{_ROLES}\b|\bnot\s+my\s+(?:own\s+)?(?:policy|claim)\b",
     _I,
 )
 POLICYHOLDER_RE = re.compile(
-    r"\bi(?:'m|\s+am)\s+the\s+(?:policy\s?holder|insured|member|account\s+holder)\b|"
+    r"\bi(?:'m|\s+am)\s+the\s+(?:policy\s?holder|insured|member|account\s+holder)(?!'s)\b|"
     r"\b(?:it(?:'s|\s+is)|this\s+is)\s+my\s+(?:own\s+)?policy\b|\bmy\s+own\s+(?:policy|claim)\b",
     _I,
 )
@@ -151,7 +182,8 @@ REFUSAL_RE = re.compile(
     r"none\s+of\s+your\s+business|\bskip\s+(?:the\s+|this\s+|all\s+)?(?:verification|identity|security|questions|step)|"
     r"without\s+(?:verif\w+|all\s+(?:this|these))|\bi\s+refuse\b|\bno\s+way\b|stop\s+asking|"
     r"\bcan(?:'t|not)?\s+you\s+just\b|\bi\s+said\s+no\b|\bi(?:'d|\s+would)\s+rather\s+not\b|"
-    r"\bnot\s+doing\s+(?:this|that)\b|\bnot\s+comfortable\b",
+    r"\bnot\s+doing\s+(?:this|that)\b|(?:\bnot|n't)\s+(?:feel\s+)?comfortable\b|\bstill\s+no\b|\bnot\s+happening\b|"
+    r"^\W*(?:let's\s+)?skip\s+(?:it|this|that)\b|\byou\s+don't\s+need\s+(?:that|this|my|any)\b|\bno\s+chance\b",
     _I,
 )
 PLAIN_NO_RE = re.compile(r"^\W*(?:no|nope|nah|no\s+thanks|no\s+thank\s+you|no\s+way|never|i\s+won't|i\s+will\s+not)\W*$", _I)
@@ -189,7 +221,9 @@ VERIFY_Q_RE = re.compile(
     r"\bare\s+you\s+(?:still\s+)?(?:there|listening|recording)\b|\bdo\s+you\s+(?:need|want)\b|\bwhat\s+do\s+you\s+need\b|"
     r"\b(?:driver'?s?\s+licen[sc]e|passport|maiden\s+name|middle\s+name|zip\s+code|home\s+address|member\s+id)\b|"
     r"\b(?:instead|other\s+way|another\s+way|different\s+way|any\s+other|something\s+else|not\s+sure\s+what)\b|"
-    r"\bwhy\b|\b(?:safe|secure|trust|privacy|private|scam|legit)\b",
+    r"\bwhy\b|\b(?:safe|secure|trust|privacy|private|scam|legit)\b|\bthis\s+for\b|\bthe\s+point\b|\bhow\s+come\b|"
+    r"\breason\b|\boptions?\b|\blater\b|\banother\s+time\b|\bcall\s+back\b|\bcome\s+back\b|\bright\s+now\b|"
+    r"\bdo\s+this\b|\bevery\s+time\b|\bhear\s+me\b|\banyone\s+there\b|\bhow\s+long\b|\benough\b|\bwho\s+is\s+this\b",
     _I,
 )
 SHORT_CLARIFY_RE = re.compile(
@@ -237,10 +271,20 @@ INTENT_RULES = [
         "claim_status",
         r"\bstatus\b|\bupdate\b|where\s+(?:is|are)\s+(?:my|the|we)\b|\bprogress\b|any\s+news|"
         r"(?:been|got|get|gets)\s+(?:approved|processed|reviewed)|still\s+(?:open|pending|processing|in\s+progress)|"
-        r"what(?:'s|\s+is)\s+(?:happening|going\s+on)\s+with",
+        r"what(?:'s|\s+is)\s+(?:happening|going\s+on)\s+with|"
+        r"when\s+(?:was|did)\s+(?:it|this|that|i|you|we|the\s+claim|my\s+claim)\s+(?:\w+\s+)?(?:filed?|submit(?:ted)?|opened|received)|"
+        r"\bfiling\s+date\b|\bdate\s+(?:it\s+was\s+)?filed\b",
     ),
 ]
 GENERAL_CLAIM_RE = re.compile(r"\bclaims?\b|\bcase\b", _I)
+# Things a caller asks the assistant to do that it cannot: these get an honest "not from here".
+ACTION_REQUEST_RE = re.compile(
+    r"\b(?:approve|expedite|speed\s+up|rush|fast-?track|waive|cancel|withdraw|pay\s+me|"
+    r"(?:file|open|start|make)\s+a\s+(?:new\s+)?claim|"
+    r"(?:update|change|correct|fix)\s+my\s+(?:phone|address|e-?mail|name|number|details|bank|contact)|"
+    r"send\s+me\s+(?:a\s+|the\s+|my\s+)?(?:check|payment|money))\b",
+    _I,
+)
 # With a claim in focus, disagreeing with the outcome is a question about what can be done.
 DISPUTE_RE = re.compile(
     r"\b(?:this|that|it)(?:'s|\s+is)\s+(?:wrong|a\s+mistake|not\s+right|incorrect|unfair|not\s+fair)\b|"
@@ -282,21 +326,29 @@ YEAR_REF_RE = re.compile(
     _I,
 )
 STATUS_REF_RE = re.compile(rf"\b(denied|rejected|open|pending|closed|settled)\s+(?:\w+\s+)?{_REF}\b", _I)
+# When the agent has just listed claims, a month, a year or "the newer one" on its own is an answer.
+BARE_MONTH_RE = re.compile(rf"\b({MONTH_ALT})\b", _I)
+BARE_YEAR_RE = re.compile(r"\b(20\d{2})\b")
 FOLLOW_ON_RE = re.compile(
     r"\b(?:an)?other\s+(?:\w+\s+)?(?:one|claims?)\b|\ba\s+different\s+(?:one|claim)\b|\b(?:second|next)\s+claim\b", _I
 )
-_ORDINAL_WORDS = r"first|1st|second|2nd|third|3rd|fourth|4th|last|latest|newest|most\s+recent|oldest"
+_ORDINAL_WORDS = r"first|1st|second|2nd|third|3rd|fourth|4th|last|latest|newest|newer|most\s+recent|more\s+recent|oldest|older|earlier|earliest"
 ORDINAL_RE = re.compile(
     rf"\b({_ORDINAL_WORDS})\s+(?:one|claim|option|in\s+the\s+list)\b|"
     rf"^\W*(?:(?:the|um+|uh+|ok|okay|yes|yeah)\s+)*({_ORDINAL_WORDS})(?:\s+please)?\W*$",
     _I,
 )
 _ORDINALS = {
-    "first": 0, "1st": 0, "latest": 0, "newest": 0, "most recent": 0,
-    "second": 1, "2nd": 1, "third": 2, "3rd": 2, "fourth": 3, "4th": 3, "last": -1, "oldest": -1,
+    "first": 0, "1st": 0, "latest": 0, "newest": 0, "newer": 0, "most recent": 0, "more recent": 0,
+    "second": 1, "2nd": 1, "third": 2, "3rd": 2, "fourth": 3, "4th": 3,
+    "last": -1, "oldest": -1, "older": -1, "earlier": -1, "earliest": -1,
 }
+# "I can't get the report": the thing that is missing has to be a document, or "it" / "them".
 ALTERNATIVE_RE = re.compile(
-    r"(?:don't|do\s+not|can't|cannot|couldn't|unable\s+to|no\s+longer|never)\s+(?:have|get|find|obtain|locate)|"
+    r"(?:don't|do\s+not|can't|cannot|couldn't|unable\s+to|no\s+longer|never)\s+(?:have|get|find|obtain|locate)\s+"
+    r"(?:(?:a|an|the|my|that|this|those|these|any|either|both)\s+)?(?:\w+\s+){0,2}?"
+    r"(?:reports?|notes?|records?|documents?|paperwork|estimates?|photos?|pictures?|cop(?:y|ies)|files?|forms?|"
+    r"it|them|that|those|one|either|both)\b|"
     r"\blost\s+(?:it|the|my)\b|\balternative|\binstead\s+of\b|\bsubstitute|\breplacement\b|"
     r"\bother\s+(?:proof|documents?)\b|not\s+available",
     _I,
@@ -309,14 +361,14 @@ EMOTION_RULES = [
         "angry",
         r"\b(?:ridiculous|unacceptable|outrageous|furious|pissed|angry|bullshit|stupid|useless|incompetent|"
         r"terrible|awful|horrible|worst|wtf|damn|screw|scam|idiots?|absurd|insane|nonsense|garbage|"
-        r"a\s+joke|complaint)\b|!!+",
+        r"a\s+joke|complaint|unbelievable|pathetic|disgrace(?:ful)?)\b|!!+",
     ),
     (
         "frustrated",
         r"frustrat|already\s+(?:told|gave|said|explained|provided)|how\s+many\s+times|waste\s+of\s+(?:my\s+)?time|"
         r"wasting\s+my|annoy|fed\s+up|sick\s+of|tired\s+of|\bcome\s+on\b|\bseriously\b|keep\s+asking|not\s+helpful|"
         r"going\s+in\s+circles|getting\s+nowhere|just\s+tell\s+me|for\s+the\s+(?:third|second|last)\s+time|\bugh\b|"
-        r"\bi\s+said\b|can't\s+believe|not\s+listening|what\s+a\s+mess",
+        r"\bi\s+said\b|can't\s+believe|not\s+listening|what\s+a\s+mess|hopeless|pointless|don't\s+have\s+time",
     ),
     (
         "anxious",
@@ -355,10 +407,16 @@ HUMAN_RE = re.compile(
     ),
     _I,
 )
+# A negation cancels the request only when it governs the transfer or the person:
+# "don't transfer me", "I'd rather not talk to a person". "I don't want a bot" cancels nothing.
 HUMAN_NEG_RE = re.compile(
-    rf"\b(?:don't|do\s+not|dont|not|never|no\s+need|rather\s+not|without|won't)\b[^.?!]{{0,40}}?"
-    rf"\b(?:transfer|connect|escalate|put\s+me|talk|speak|chat|{_PERSON})\b",
+    rf"\b(?:don't|do\s+not|dont|not|never|no\s+need(?:\s+to)?|rather\s+not|without|won't)\s+(?:\w+\s+){{0,3}}?"
+    rf"(?:transfer|connect|escalat\w+|put\s+me|(?:talk|speak|chat)\w*\s+(?:to|with)\s+(?:(?:a|an|the|your)\s+)?"
+    rf"(?:real\s+|live\s+|actual\s+)?(?:{_PERSON}|someone|somebody)|(?:want|need)\s+(?:(?:a|an)\s+)?{_PERSON})\b",
     _I,
+)
+HUMAN_ASKING_RE = re.compile(
+    r"\b(?:do|should|must|will|would)\s+i\s+(?:really\s+)?(?:need|have)\s+to\b|\bshould\s+i\b|\bis\s+it\s+(?:better|worth)\b", _I
 )
 REP_STATEMENT_RE = re.compile(
     r"\b(?:i'm|i\s+am|as)\s+(?:her|his|their|the|an?)\s+(?:authori[sz]ed\s+)?representative\b|"
@@ -369,7 +427,15 @@ REP_STATEMENT_RE = re.compile(
 _YES = (
     r"(?:yes|yeah|yep|yup|uh\s+huh|mhm+|mm+\s*hmm+|sure|ok|okay|alright|fine|correct|right|absolutely|definitely|of\s+course|please\s+do|"
     r"go\s+ahead|sounds\s+good|do\s+it|that\s+works|that's\s+right|that\s+is\s+right|that's\s+correct|"
-    r"that's\s+the\s+one|that\s+one|exactly)"
+    r"that's\s+the\s+one|that\s+one|exactly|that\s+would\s+be\s+(?:great|good|nice|helpful|lovely)|"
+    r"i(?:'d|\s+would)\s+like\s+that|go\s+for\s+it|why\s+not|i\s+suppose(?:\s+so)?|i\s+guess(?:\s+so)?)"
+)
+_HANDOFF_WORDS = set("connect transfer human person representative agent someone them through put with him her up over".split())
+# Words that may follow a yes at the email offer without making it anything but a yes.
+_YES_FILLER = set(
+    """please thanks thank you do it that this send go ahead sure yes yeah yep ok okay great sounds good perfect
+    would be i'd i like love the a summary email e-mail me to my address on file absolutely definitely of course
+    fine alright right works lovely nice helpful appreciate very so much for now then just one""".split()
 )
 _NO = r"(?:no|nope|nah|negative|not\s+now|not\s+really|never\s?mind)"
 YES_START_RE = re.compile(rf"^\W*{_YES}\b", _I)
@@ -379,7 +445,8 @@ NEGATION_RE = re.compile(r"\b(?:no|not|never|nothing|none|nope|nah)\b|n't\b", _I
 # After a leading "no", these mean the caller is not finished or is not simply declining.
 NO_BUT_RE = re.compile(
     r"\b(?:wait|hold\s+on|actually|but|still|one\s+more|another|questions?|send|yes|skip|listening|wrong|"
-    r"understand|confused|can't\s+be|hang\s+up|close|why|how|what|mean)\b|\?|!!",
+    r"understand|confused|can't\s+be|hang\s+up|close|why|how|what|mean|meant|other|different|instead|not\s+that|"
+    r"the\s+\w+\s+(?:one|claim))\b|\?|!!",
     _I,
 )
 MORE_RE = re.compile(
@@ -394,7 +461,10 @@ DONE_RE = re.compile(
     r"no\s+further\s+questions|i'm\s+good|im\s+good|i\s+am\s+good|i'm\s+fine|all\s+set|all\s+good|"
     r"that's\s+everything|that\s+is\s+everything|that'll\s+be\s+all|that\s+will\s+be\s+all|we're\s+done|"
     r"i'm\s+done|im\s+done|good\s?bye|bye(?:\s+bye)?|have\s+a\s+(?:good|nice|great)\s+(?:day|one|evening|night|weekend)|"
-    r"take\s+care|never\s?mind)\b",
+    r"take\s+care|never\s?mind|(?:don't|do\s+not)\s+have\s+(?:any|any\s+other|any\s+more|any\s+further|more|other)\s+questions|"
+    r"(?:don't|do\s+not)\s+have\s+anything\s+else|no\s+other\s+questions|nothing\s+(?:more|further)|"
+    r"(?:need|have|got|gotta)\s+to\s+go|gotta\s+go|talk\s+(?:to\s+you\s+)?later|thanks\s+anyway|"
+    r"i'll\s+call\s+(?:you\s+)?back|call\s+back\s+(?:later|another\s+time|tomorrow)|i'll\s+come\s+back|maybe\s+later)\b",
     _I,
 )
 # Words that may stand around a closing phrase without changing what it means.
@@ -421,7 +491,8 @@ THANKS_ONLY_RE = re.compile(
 EMAIL_NEGATED_RE = re.compile(
     r"\b(?:don't|do\s+not|dont|not|never|no\s+need\s+to|won't|shouldn't)\s+(?:\w+\s+){0,2}?(?:send|e-?mail|forward|bother)\b|"
     r"\b(?:don't|do\s+not|dont)\s+(?:want|need)\b|\bno\s+e-?mails?\b|\bno\s+summary\b|\bskip\b|\bno\s+need\b|"
-    r"\bnot\s+necessary\b|\b(?:i'll|i\s+will|let's|we'll|hard)\s+pass\b|^\W*pass\W*$",
+    r"\bnot\s+necessary\b|\b(?:i'll|i\s+will|let's|we'll|hard)\s+pass\b|^\W*pass\W*$|"
+    r"\b(?:don't|do\s+not)\s+(?:have|use)\s+(?:an?\s+)?e-?mail\b",
     _I,
 )
 EMAIL_SEND_RE = re.compile(r"\bsend\b|\be-?mail\s+(?:it|me|that)\b|\bforward\b|\bgo\s+ahead\b", _I)
@@ -463,7 +534,15 @@ CLAIMISH_RE = re.compile(
     r"copay|co-pay|out\s+of\s+pocket|in-?network|plan|member|expedite|rush|urgent|complain\w*|submit\w*|upload\w*|"
     r"hear\s+back|call(?:ed)?\s+(?:me\s+)?back|contact\s+(?:me|you)|healthcare|health\s?care|medical|dental|auto|"
     r"vehicle|car|forms?|(?:phone|contact|fax)\s+number|i\s+can\s+call|customer\s+service|office|in\s+person|"
-    r"human|person|agent|supervisor|manager|transfer(?:red)?)\b",
+    r"human|person|agent|supervisor|manager|transfer(?:red)?|service|diagnos\w+|codes?|coinsurance|filed|filing|"
+    r"date\s+of|visit|appointment|provider|facility)\b",
+    _I,
+)
+# Short follow-ups that only make sense as a reaction to what was just said.
+CLARIFY_RE = re.compile(
+    r"\b(?:are\s+you\s+sure|you\s+sure|for\s+real|really|seriously|how\s+so|how\s+come|since\s+when|why\s+not|"
+    r"and\s+then|then\s+what|what\s+else|what\s+do\s+you\s+mean|explain|understand|say\s+again|pardon|excuse\s+me|"
+    r"going\s+on|happening|what(?:'s|\s+is)\s+wrong|the\s+(?:problem|matter|issue|hold-?up|delay)|taking\s+so\s+long)\b",
     _I,
 )
 # Words that tie a short message to the conversation so far.
@@ -477,18 +556,21 @@ OOS_RE = re.compile(
     r"reinforcement\s+learning|rl|machine\s+learning|deep\s+learning|neural|llm|chatgpt|gpt|openai|president|"
     r"election|capital\s+of|stocks?|bitcoin|crypto|football|soccer|basketball|nba|nfl|world\s+cup|super\s+bowl|"
     r"movies?|netflix|homework|math|equation|translate|meaning\s+of\s+life|horoscope|lottery|restaurants?|"
-    r"flights?|hotels?|vacation|taxes|recommend|medical\s+advice|legal\s+advice)\b|"
+    r"flights?|hotels?|vacation|taxes|recommend|medical\s+advice|legal\s+advice|rain(?:ing)?|snow(?:ing)?|"
+    r"forecast|temperature|aliens?|music|cover\s+letter|flat\s+tire)\b|"
     r"\btell\s+me\s+a\s+(?:joke|story)\b|\bjoke\s+about\b|\bshould\s+i\s+(?:get|take|have|sue|see)\b|"
     r"\byour\s+(?:instructions|prompt|system\s+prompt|rules)\b|"
     r"\bignore\s+(?:all\s+|your\s+|the\s+|previous\s+)*(?:instructions|rules)\b",
     _I,
 )
-MATH_RE = re.compile(r"^[\d\s+\-*/x().=?]*\d\s*[+\-*/x]\s*\d[\d\s+\-*/x().=?]*$", _I)
+# Arithmetic needs a plus, a times or an equals sign. Digits with slashes or dashes are a date or a phone number.
+MATH_RE = re.compile(r"^[\d\s+\-*/x().]*\d\s*(?:[+*x]\s*\d[\d\s+\-*/x().]*[=?\s]*|[\-/]\s*\d[\d\s+\-*/x().]*=[=?\s]*)$", _I)
 GENERAL_KNOWLEDGE_RE = re.compile(
     r"^\W*(?:what|who|where|when)(?:'s|\s+is|\s+are|\s+was|\s+were)\s+"
     r"(?!my\b|it\b|this\b|that\b|your\b|in\s+(?:it|that|the)\b|"
     r"(?:the\s+|a\s+)?(?:status|deadline|reason|next|appeal|amount|claim|process|problem|issue|hold-?up|delay|"
-    r"address|e-?mail|summary|difference|plan|policyholder|policy|point|catch|alternative)\b)|"
+    r"address|e-?mail|summary|difference|plan|policyholder|policy|point|catch|alternative|matter)\b|"
+    r"going\s+on\b|happening\b|wrong\b|taking\b)|"
     r"^\W*who\s+(?:won|invented|wrote|discovered|painted)\b|"
     r"^\W*how\s+(?:do|can|would)\s+(?:i|you|we)\s+(?:bake|cook|make|build|code|program|learn|play|draw|lose\s+weight)\b|"
     r"^\W*how\s+(?:tall|old|far|big|hot|cold)\s+(?:is|are|was)\b|^\W*why\s+is\s+the\s+(?:sky|sea|grass|ocean)\b",
@@ -547,11 +629,22 @@ def _first_name(pattern: re.Pattern[str], text: str, require_caps: bool) -> str:
 
 
 def _name_tail(candidate: str) -> str:
-    """The trailing words of a capitalised run that can be a name ("Hi Jane Doe" -> "Jane Doe")."""
+    """The part of a run of words that can be a name ("hi jane doe about her" -> "jane doe").
+
+    One word alone only counts when it is capitalised, because a lower-case word is as
+    likely to be a topic ("calling for reimbursement") as a name.
+    """
     tokens = candidate.split()
-    while tokens and tokens[0].lower() in _COMMON:
+    while tokens and (tokens[0].lower() in _COMMON or tokens[0].lower() in _KIN):
         tokens.pop(0)
-    return " ".join(tokens) if tokens and not any(t.lower() in _COMMON for t in tokens) else ""
+    name: list[str] = []
+    for token in tokens:
+        if token.lower() in _COMMON or token.lower() in _KIN or len(name) == 3:
+            break
+        name.append(token)
+    if len(name) >= 2 or (len(name) == 1 and name[0][0].isupper()):
+        return " ".join(name)
+    return ""
 
 
 def _mask(text: str, span: tuple[int, int]) -> str:
@@ -592,8 +685,10 @@ def _is_closing(low: str) -> bool:
     return all(word in _CLOSING_FILLER for word in rest)
 
 
-def _email_choice(low: str, polarity: str, at_offer: bool, question_like: bool) -> str:
+def _email_choice(low: str, polarity: str, at_offer: bool, question_like: bool, leaving: bool = False) -> str:
     """send, skip or none. Mixed or unclear wording is none, so the policy asks again."""
+    if re.search(r"\blater\b|\banother\s+time\b|\btomorrow\b|\bnext\s+week\b|\bnot\s+yet\b", low):
+        return "none"  # nothing can be scheduled, so the question is asked again
     text = NOT_SKIP_RE.sub(" send it ", low)  # "don't skip it" asks for it
     skip = bool(EMAIL_NEGATED_RE.search(text))
     rest = EMAIL_NEGATED_RE.sub(" ", text)
@@ -605,8 +700,14 @@ def _email_choice(low: str, polarity: str, at_offer: bool, question_like: bool) 
     if send:
         unclear = bool(NEGATION_RE.search(rest)) or (question_like and not EMAIL_REQUEST_RE.search(low))
         return "none" if unclear else "send"
-    if at_offer:
-        return {"yes": "send", "no": "skip"}.get(polarity, "none")
+    if not at_offer:
+        return "none"
+    if leaving or polarity == "no":
+        return "skip"  # "ok bye" is someone leaving, not someone asking for an email
+    if polarity == "yes":
+        # A yes sends only when nothing else is said with it: "ok", "yes please", "sure, thanks".
+        said = re.findall(r"[a-z'\-]+", YES_START_RE.sub("", low, count=1))
+        return "send" if all(word in _YES_FILLER for word in said) else "none"
     return "none"
 
 
@@ -625,12 +726,18 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
     question_like = "?" in text or bool(QUESTION_START_RE.match(low))
 
     # ---- who is calling -----------------------------------------------------
-    holder_name = ""
+    holder_name, own_after_role = "", ""
     match = _POSSESSIVE_ROLE.search(text)
     if match:
-        holder_name = _name_tail(match.group(1))
-    match = _CALLING_FOR.search(text)
-    third_party = _name_tail(match.group(1)) if match else ""
+        holder_name = _name_tail(match.group(1) or match.group(2))
+        if holder_name:
+            own_after_role = _take_name(text[match.end():], True)  # "...'s son David Chen"
+    third_party = ""
+    for pattern in (_CALLING_FOR, _CALLING_ABOUT, _ROLE_FOR, _IS_MY):
+        match = pattern.search(text)
+        if match and _name_tail(match.group(1)):
+            third_party = _name_tail(match.group(1))
+            break
     if session.verified:
         if SELF_REP_RE.search(text):
             u.caller_role = "representative"
@@ -638,8 +745,9 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
         u.caller_role = "representative"
     elif POLICYHOLDER_RE.search(text):
         u.caller_role = "policyholder"
-    elif REP_WEAK_RE.search(text):
+    elif REP_WEAK_RE.search(text) and (memory.caller_role == "representative" or not session.verification.get("matched")):
         u.caller_role = "representative"
+        u.guessed.append("caller_role")  # inferred from how they talk, never said outright
     is_rep = u.caller_role == "representative" or (u.caller_role == "unknown" and memory.caller_role == "representative")
 
     # ---- structured identity values, masking each as it is found -------------
@@ -668,14 +776,19 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
         if year is None:
             continue
         before = work[max(0, span[0] - 30): span[0]]
-        if DOB_TRIGGER_RE.search(before) or year <= today.year - 14:
+        someone_elses = bool(_THIRD_PARTY_RE.search(work[max(0, span[0] - 45): span[0]])) and not is_rep
+        if someone_elses:
+            pass  # "my husband's birthday is ...": not the caller's own detail
+        elif DOB_TRIGGER_RE.search(before) or year <= today.year - 14:
             raw.setdefault("dob", f"{year:04d}-{month:02d}-{day:02d}")
         else:
             free_dates.append((year, month))
         work = _mask(work, span)
     match = PHONE_RE.search(work)
     if match and 10 <= len(re.sub(r"\D", "", match.group(1))) <= 11:
-        raw["phone"] = match.group(1)
+        before = work[max(0, match.start() - 45): match.start()]
+        if not _CALLBACK_RE.search(before) and not (_THIRD_PARTY_RE.search(before) and not is_rep):
+            raw["phone"] = match.group(1)
         work = _mask(work, match.span())
     if "id_last4" not in raw:
         match = LAST4_RE.search(work)
@@ -685,44 +798,83 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
     structured = bool(raw)  # something that is unmistakably an identity value
 
     # ---- names ----------------------------------------------------------------
-    self_name = ""
-    if not holder_name:
-        self_name = _first_name(_STRONG_NAME, text, False)
-        if not self_name and not shouting:
-            weak = _first_name(_WEAK_NAME, text, True)
-            first_only = bool(weak) and in_verify and pending == "identity" and weak.lower() not in _COMMON
-            self_name = weak if len(weak.split()) >= 2 or first_only else ""
-        if not self_name:
-            match = _SUFFIX_NAME.search(text)
-            if match and not any(tok.lower() in _COMMON for tok in match.group(1).split()):
-                self_name = match.group(1)
+    self_name = _first_name(_STRONG_NAME, text, False)
+    lower_guess = False
+    if not self_name and not shouting:
+        weak = _first_name(_WEAK_NAME, text, True)
+        first_only = bool(weak) and in_verify and pending == "identity" and weak.lower() not in _COMMON
+        self_name = weak if len(weak.split()) >= 2 or first_only else ""
+        if not self_name and in_verify and pending in {"identity", "rep_name"}:
+            # "hi this is jane doe": typed without capitals, so it is only a guess
+            weak = _first_name(_WEAK_NAME, text, False)
+            tokens = weak.split()
+            plain = all(t.lower() not in _COMMON and not re.search(r"(?:ing|ed|ly)$", t.lower()) for t in tokens)
+            if 2 <= len(tokens) <= 3 and plain:
+                self_name, lower_guess = weak, True
+    if not self_name:
+        match = _SUFFIX_NAME.search(text)
+        if match and not any(tok.lower() in _COMMON for tok in match.group(1).split()):
+            self_name = match.group(1)
+    if holder_name and self_name.lower() == holder_name.lower():
+        self_name = ""  # "I'm Jane Doe's husband" names Jane Doe, not the caller
+    if len(own_after_role.split()) >= 2:
+        self_name = own_after_role
     other_name = holder_name or third_party or _first_name(_OTHER_NAME, text, True)
     if is_rep:
         if other_name:
             raw["full_name"] = other_name
-        if len(self_name.split()) >= 2 and self_name != other_name:
+        if len(self_name.split()) >= 2 and self_name.lower() != other_name.lower():
             u.representative_name = self_name
     elif self_name:
         raw["full_name"] = self_name
+        if lower_guess:
+            u.guessed.append("full_name")
 
     # A reply that is only a name, possibly next to other details: "Jane Doe, 0000"
     if in_verify:
+        dob_known = "dob" in raw or "dob" in memory.identity
+        known_name = (memory.identity.get("full_name") or "").lower()
         segments = [seg.strip() for seg in re.split(r"[,;\n]|\band\b|[.!?](?:\s|$)", work) if seg.strip()]
         for piece in segments:
-            if "id_last4" not in raw and re.fullmatch(r"\W*(?:it'?s\s+|its\s+)?(\d{4})\W*", piece, _I):
-                raw["id_last4"] = re.sub(r"\D", "", piece)
-                structured = True
-                continue
+            # a four-digit number standing alone, possibly after a name: "jane doe 0000"
+            match = re.fullmatch(r"\W*(?:it'?s\s+|its\s+)?(?:([A-Za-z][A-Za-z'\-\s]*?)\s+)?(\d{4})\W*", piece, _I)
+            if match and "id_last4" not in raw:
+                number = int(match.group(2))
+                if 1900 <= number <= today.year and not dob_known:
+                    # Could be a year of birth. Never guess: a wrong guess is a failed attempt.
+                    u.partial.append("dob" if re.search(r"\bborn\b|\bbirth", low) else "dob_or_id")
+                else:
+                    raw["id_last4"] = match.group(2)
+                    structured = True
+                piece = (match.group(1) or "").strip()
+                if not piece:
+                    continue
             lower_ok = pending in {"identity", "rep_name"} and (len(segments) == 1 or structured) and not question_like
             name, guess = _bare_name(piece, allow_lower=lower_ok)
+            if not name and pending == "identity" and re.fullmatch(r"\W*[A-Z][a-z\-]{1,20}\W*", piece):
+                word = piece.strip(" .,;:!?")
+                if word.lower() not in _COMMON and word.lower() not in MONTHS:
+                    name, guess = word, True  # one capitalised word: part of a name
             if not name:
                 continue
-            if pending == "rep_name" or (is_rep and memory.identity.get("full_name") and not memory.representative_name):
-                u.representative_name = u.representative_name or name
+            if pending == "rep_name":
+                if name.lower() != known_name:
+                    u.representative_name = u.representative_name or name
             elif "full_name" not in raw and not (is_rep and u.representative_name == name):
                 raw["full_name"] = name
                 if guess:
                     u.guessed.append("full_name")
+        if pending == "identity" and not dob_known:
+            # a date without its year, or digits that are not a whole date or phone number
+            partial_date = any(year is None for year, _m, _d, _s in find_dates(work)) and not re.search(r"\bclaims?\b", low)
+            if partial_date or re.fullmatch(r"\W*\d{1,2}\s*[/.\-]\s*\d{1,2}\W*", work.strip()):
+                u.partial.append("dob")
+            elif re.search(r"\bborn\s+in\b|\byear\s+of\s+birth\b", low) and "dob_or_id" not in u.partial:
+                u.partial.append("dob")
+        if pending == "identity" and "phone" not in raw and re.fullmatch(r"[\d\s().+\-]+", work.strip() or "x"):
+            if 7 <= len(re.sub(r"\D", "", work)) <= 9:
+                u.partial.append("phone")
+        u.partial = list(dict.fromkeys(u.partial))
 
     u.identity = normalize_identity(raw, today)
     u.representative_name = clean_representative_name(u.representative_name)
@@ -739,7 +891,8 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
         if "full_name" in u.declined_fields and len(u.declined_fields) > 1:
             u.declined_fields.remove("full_name")  # "name" is too generic when another detail is named
     if not session.verified and not identity_given and not u.declined_fields:
-        if REFUSAL_RE.search(low) or (pending == "identity" and PLAIN_NO_RE.match(low)):
+        says_no = pending == "identity" and (PLAIN_NO_RE.match(low) or (_polarity(low) == "no" and not question_like))
+        if REFUSAL_RE.search(low) or says_no:
             u.refuses_verification = True
 
     # ---- what the caller wants ---------------------------------------------------
@@ -750,6 +903,8 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
             matched = ["denial_explanation"]
         elif DISPUTE_RE.search(low) and "appeal_or_next_steps" not in matched:
             matched.append("appeal_or_next_steps")
+        if not matched and re.search(r"\bwhat\s+happens\s+(?:next|now|then|after)\b|\bwhat(?:'s|\s+is)\s+next\b", low):
+            matched = ["appeal_or_next_steps"]
     if WHAT_NEED_RE.search(low):
         if in_verify:
             u.process_question = True
@@ -780,7 +935,10 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
     u.followup_topics = list(dict.fromkeys(topics))
     if u.followup_topics and not matched and phase in {PROCESS_CASE, RESOLVE_INTENT}:
         matched = ["document_requirements"]
-    if not matched and GENERAL_CLAIM_RE.search(low) and not u.process_question:
+    action_request = session.verified and bool(ACTION_REQUEST_RE.search(low)) and not NEGATION_RE.search(low)
+    if action_request:
+        matched, u.followup_topics = [], []  # no path does this: the reply says so and offers a person
+    elif not matched and GENERAL_CLAIM_RE.search(low) and not u.process_question:
         matched = ["general_claim_question"]
 
     # ---- which claim -----------------------------------------------------------------
@@ -788,7 +946,12 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
     if session.case_id and session.verified:
         # A claim is in focus. Only a hint attached to a claim reference can point elsewhere:
         # "my auto claim", "the one from 2025". A stray date or the word "car" cannot.
-        if not re.search(r"\bthis\s+(?:claim|one|case)\b", hint_text):
+        dismissed = re.search(
+            r"\bnot\s+(?:about|for|on|regarding)\b|n't\s+about\b|\bbut\s+that's\s+(?:fine|ok|okay)\b|\bnever\s?mind\b|"
+            r"\bnot\s+now\b|\bforget\s+(?:it|that|about)\b",
+            hint_text,
+        )
+        if not dismissed and not re.search(r"\bthis\s+(?:claim|one|case)\b", hint_text):
             for claim_type, alt in _TYPE_WORDS.items():
                 if re.search(rf"\b(?:{alt})\s+(?:\w+\s+)?{_REF}\b", hint_text):
                     hints["claim_type"] = claim_type
@@ -808,6 +971,11 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
                 hints["year"] = today.year - 1 if "last" in value else today.year if "this" in value else int(value)
             if FOLLOW_ON_RE.search(hint_text) and "claim_id" not in hints:
                 hints["exclude_current"] = True
+            if "status" in hints and len(hints) == 1:
+                # "the denied one" while an open claim is in focus points at another claim
+                current = data.claim_for_party(session.party_id, session.case_id)
+                if current and current["status"] != hints["status"]:
+                    hints["exclude_current"] = True
             if "status" not in hints and any(k in hints for k in ("claim_type", "month", "year", "exclude_current")):
                 # The message is about another claim, so a status word in it describes that one.
                 for status, pattern in STATUS_RULES:
@@ -843,6 +1011,16 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
             if free_dates:
                 hints.setdefault("month", free_dates[0][1])
                 hints.setdefault("year", free_dates[0][0])
+            if pending == "choose_case" and "claim_id" not in hints:
+                # an answer to "which one?": "the november one", "February 28", "the 2026 one"
+                for _year, month, _day, _span in find_dates(hint_text):
+                    hints.setdefault("month", month)
+                match = BARE_MONTH_RE.search(hint_text)
+                if match and (match.group(1) != "may" or re.search(r"\bmay\s+(?:one|claim|\d)|\bin\s+may\b", hint_text)):
+                    hints.setdefault("month", MONTHS[match.group(1)])
+                match = BARE_YEAR_RE.search(hint_text)
+                if match:
+                    hints.setdefault("year", int(match.group(1)))
     u.case_hints = hints
 
     if pending == "choose_case" and session.last_candidates and "claim_id" not in hints:
@@ -862,13 +1040,20 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
         u.emotion = "angry"
 
     # ---- a person, yes or no, more to ask, finished ---------------------------------------
+    clauses = [c for c in re.split(r"[.!?;,]+|\bbut\b|\bso\b", text) if c.strip()]
     u.wants_human = (
-        bool(HUMAN_RE.search(text))
-        and not HUMAN_NEG_RE.search(text)
+        any(
+            HUMAN_RE.search(clause) and not HUMAN_NEG_RE.search(clause) and not HUMAN_ASKING_RE.search(clause)
+            for clause in clauses
+        )
         and not REP_STATEMENT_RE.search(low)
         and not BOT_QUESTION_RE.search(low)
     )
     u.affirmation = _polarity(low)
+    if pending == "human_offer" and u.affirmation == "yes":
+        said = re.findall(r"[a-z'\-]+", YES_START_RE.sub("", low, count=1))
+        if not all(word in _YES_FILLER or word in _HANDOFF_WORDS for word in said):
+            u.affirmation = "none"  # "sure, thanks anyway", "alright, I'll call back later"
     asks = bool(matched or u.followup_topics)
     u.more = bool(MORE_RE.search(low)) and not asks
     if u.more:
@@ -883,17 +1068,20 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
 
     # ---- the email summary ------------------------------------------------------------------
     at_offer = pending == "email_offer"
-    if at_offer and (ADDRESS_CHANGE_RE.search(low) or u.process_question):
+    # At the offer, a question that is not about a claim is a question about the summary.
+    summary_question = at_offer and question_like and not asks and not u.case_hints and not EMAIL_REQUEST_RE.search(low)
+    if at_offer and (ADDRESS_CHANGE_RE.search(low) or u.process_question or summary_question):
         u.process_question = True  # a question about the summary, not a choice
+        u.affirmation = "none"  # "yes, but to my work address" is not a yes to sending
         matched = [i for i in matched if re.search(r"\bdocuments?\b|\bclaims?\b", low)]
     elif at_offer or phase == CLOSED:
         # After closing, only wording that names the summary reopens the choice. A preference
         # is never read there, because in CLOSED a "send" is an action.
         reopen = phase == CLOSED and not session.outbox and bool(CLOSED_SEND_RE.search(low))
         if (at_offer or reopen) and not asks and not u.more:
-            u.email_summary_choice = _email_choice(low, u.affirmation, at_offer, question_like)
-            if u.email_summary_choice == "none" and at_offer and u.done:
-                u.email_summary_choice = "skip"  # "that's all, bye" at the offer is a no
+            u.email_summary_choice = _email_choice(low, u.affirmation, at_offer, question_like, leaving=u.done)
+            if at_offer and u.email_summary_choice == "none":
+                u.affirmation = "none"  # the yes or no is already weighed above: "yes, later" is not a yes
     elif EMAIL_VOLUNTEER_RE.search(low) and "email" not in u.identity and not (in_verify and u.declined_fields):
         # Said at another point in the call: a preference to remember, never an action.
         if EMAIL_NEGATED_RE.search(low):
@@ -917,33 +1105,46 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
         u.identity or u.representative_name or u.intent != "none" or u.case_hints or u.selected_case_id
         or u.process_question or u.wants_human or u.email_summary_choice != "none" or u.done or u.more
         or u.refuses_verification or u.declined_fields or u.followup_topics or u.caller_role != "unknown"
-        or DOMAIN_RE.search(low)
+        or u.partial or DOMAIN_RE.search(low)
     )
     oos_marker = bool(OOS_RE.search(low)) or bool(MATH_RE.match(work.strip()))
     general = bool(GENERAL_KNOWLEDGE_RE.match(low) or GENERAL_TASK_RE.match(low))
     unknown_question = question_like and not domain_hit and not short_answer
-    if (oos_marker or general) and not domain_hit:
+    claimish = bool(CLAIMISH_RE.search(low))
+    # Something ties the message to a claim or to what was just said.
+    related = claimish or bool(ANAPHORA_RE.search(low) or CLARIFY_RE.search(low)) or len(words) <= 2
+    about_step = False
+    if not session.verified and not identity_given and u.intent == "none" and not u.wants_human and not u.done:
+        # Before verification a question about the step at hand ("which three?", "can I use
+        # my address instead?") is answered, never declined.
+        clarifies = u.affirmation == "none" and bool(SHORT_CLARIFY_RE.match(low))
+        about_step = bool(
+            (question_like and VERIFY_Q_RE.search(low)) or clarifies or WAIT_RE.search(low)
+            or (unknown_question and pending in {"consent", "rep_name"})
+        )
+    if oos_marker and not domain_hit:
         u.scope = "out_of_scope"
+    elif general and not domain_hit and not claimish:
+        u.scope = "out_of_scope"  # "what is the capital of ...", not "what was the date of service?"
     elif oos_marker:
         u.scope = "mixed"
-    elif unknown_question and session.verified and not ANAPHORA_RE.search(low) and not CLAIMISH_RE.search(low):
-        u.scope = "out_of_scope"  # nothing ties it to a claim or to the conversation
+    elif unknown_question and not related and not about_step:
+        u.scope = "out_of_scope"  # nothing ties it to a claim, to the step at hand or to the conversation
     if u.scope == "out_of_scope":
         u.affirmation = "none"
         return u
 
     if not session.verified:
-        # Before verification an unclear question is about the step at hand ("which three?",
-        # "can I use my address instead?"). It is answered, never declined.
         if not identity_given and u.intent == "none" and not u.wants_human and not u.done:
-            clarifies = u.affirmation == "none" and bool(SHORT_CLARIFY_RE.match(low))
-            if (question_like and VERIFY_Q_RE.search(low)) or clarifies or WAIT_RE.search(low) or (
-                unknown_question and pending in {"consent", "rep_name"}
-            ):
+            if about_step:
                 u.process_question = True
-            elif unknown_question and CLAIMISH_RE.search(low):
+            elif unknown_question and claimish:
                 u.question = text.strip()[:300]  # something to help with once verified
+    elif action_request and not u.question:
+        u.question = text.strip()[:300]
     elif question_like and not short_answer and not u.question and not u.process_question:
+        if u.emotion == "neutral" and CLARIFY_RE.search(low) and not claimish:
+            u.emotion = "confused"  # "are you sure?", "how so?": go over it again, do not hand off
         about_email = at_offer and bool(EMAIL_WORDS_RE.search(low))
         picks_claim = bool(u.selected_case_id) or (pending == "choose_case" and bool(u.case_hints))
         settled = u.email_summary_choice != "none" or u.more or u.done or u.wants_human or about_email or picks_claim

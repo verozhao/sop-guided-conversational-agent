@@ -22,6 +22,7 @@ How much freedom each phase gives the model:
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Callable
 
@@ -123,16 +124,19 @@ class InsuranceSOP(VerifyIdPhase, ResolveIntentPhase, ProcessCasePhase, PostProc
 
         # A human is brought in on a clear request, or on a yes to a question that offered
         # only that. A yes to "verify, or a human?" is not a request for a human.
-        accepted_offer = s.pending == "human_offer" and u.affirmation == "yes" and u.scope != "out_of_scope"
+        accepted_offer = s.pending == "human_offer" and u.affirmation == "yes" and not u.done and u.scope != "out_of_scope"
         if u.wants_human or accepted_offer:
             reason = "caller asked for a human representative" if u.wants_human else "caller accepted the offer of a human representative"
             return self._escalate(s, t, reason, lead="Of course.", lead_acknowledges=False)
         if s.pending == "human_offer":
             # The offer was not taken up. Go back to where the workflow was.
-            t.declined_human = u.affirmation == "no" or u.done
+            # Saying no to a person ends the conversation only where nothing else could be
+            # done (no claims on file, not an authorized representative). After an
+            # out-of-scope or "can't do that here" offer, the workflow simply goes on.
+            t.declined_human = (u.affirmation == "no" or u.done) and s.offer_reason == "dead_end"
             s.pending = self._default_pending(s)
+            s.offer_reason = ""
             u.affirmation = "none"
-            u.done = False
 
         if u.scope == "out_of_scope":
             return self._out_of_scope(s, u, t)
@@ -159,6 +163,11 @@ class InsuranceSOP(VerifyIdPhase, ResolveIntentPhase, ProcessCasePhase, PostProc
         if not s.verified:
             already_matched = set(s.verification.get("matched", []))
             for name, value in u.identity.items():
+                stored = m.identity.get(name, "")
+                if name == "full_name" and " " not in value and stored and " " not in stored and stored.lower() != value.lower():
+                    # "Margaret" in one message and "Chen" in the next are one name
+                    first = re.search(r"\bfirst\s+name\b", t.text, re.I)
+                    value = f"{value} {stored}" if first else f"{stored} {value}"
                 if name in already_matched and m.identity.get(name) != value:
                     continue  # a detail that already matched is not replaced by a later reading
                 if m.identity.get(name) != value:
@@ -180,14 +189,19 @@ class InsuranceSOP(VerifyIdPhase, ResolveIntentPhase, ProcessCasePhase, PostProc
                 if name in m.identity and name not in u.identity and name not in already_matched:
                     del m.identity[name]  # the caller withdrew a value given earlier
             if u.caller_role != "unknown" and u.caller_role != m.caller_role:
-                if m.caller_role == "representative":
+                inferred = "caller_role" in u.guessed
+                if m.caller_role == "representative" and not m.role_guessed:
                     # Someone who said they were calling for the policyholder cannot
                     # drop the consent requirement by saying otherwise later.
                     note = "Caller first said they were a representative, then said they were the policyholder."
                     if note not in m.notes:
                         m.notes.append(note)
+                elif m.caller_role == "policyholder" and inferred:
+                    pass  # "I'm the policyholder" outweighs a role inferred from a turn of phrase
                 else:
+                    # A role that was only inferred gives way to what the caller says outright.
                     m.caller_role = u.caller_role
+                    m.role_guessed = inferred
                     captured.append(f"caller_role={u.caller_role}")
             if u.representative_name and u.representative_name != m.representative_name:
                 m.representative_name = u.representative_name

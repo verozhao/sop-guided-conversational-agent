@@ -19,6 +19,7 @@ from ..normalize import join_items, long_date
 from ..state import POST_PROCESS, PROCESS_CASE, RESOLVE_INTENT, Session
 from ..understanding import INTENT_LABELS, Understanding
 from .common import (
+    ASSISTANT_FACTS,
     DISTRESS_OFFER_AT,
     PROCESS_FACTS,
     PolicyBase,
@@ -125,15 +126,16 @@ class ProcessCasePhase(PolicyBase):
                 if u.process_question:
                     return self._directive(
                         s, t, "PROCESS_EXPLAIN",
-                        goal="Answer the caller's question about the process from facts.process, then ask if there is anything else about the claim.",
+                        goal="Answer the caller's question about how this works from facts.assistant and facts.process, then ask if there is anything else about the claim.",
                         fallback=f"{self._explain_line(s, t)} Is there anything else you'd like to know about claim {s.case_id}?",
-                        facts={"process": PROCESS_FACTS, "claim_in_focus": s.case_id},
+                        facts={"assistant": ASSISTANT_FACTS, "process": PROCESS_FACTS, "claim_in_focus": s.case_id},
                     )
                 if u.emotion in {"angry", "frustrated"} and u.affirmation == "none" and not u.more:
                     t.offer_human = False
                     s.distress_offer_made = True
                     if s.distress_streak >= DISTRESS_OFFER_AT:
                         s.pending = "human_offer"
+                        s.offer_reason = "upset"
                         return self._directive(
                             s, t, "LISTEN_OFFER_HUMAN",
                             goal="The caller has been upset for several turns without asking anything. Do not go round in circles: ask whether they would like a human representative.",
@@ -178,11 +180,14 @@ class ProcessCasePhase(PolicyBase):
             # the caller asked earlier (in any phase) is the one to answer.
             specific_now = u.intent not in {"none", "general_claim_question"}
             remembered = m.intent != "none" and not m.intent_consumed
-            if specific_now or not remembered:
+            if not remembered or (specific_now and m.intent == "general_claim_question"):
                 primary, extra = u.intent, u.extra_intents
                 question = u.question or m.backlog_question
             else:
-                primary, extra = m.intent, m.extra_intents
+                # The first question still waiting leads. A question in this message was
+                # added to it when it was heard, so both are answered.
+                extra = list(dict.fromkeys([*m.extra_intents, *([u.intent] if specific_now else []), *u.extra_intents]))
+                primary, extra = m.intent, [i for i in extra if i != m.intent]
                 question = m.backlog_question or u.question
                 source = m.captured.get("intent")
                 if source and (source["turn"] != s.turn or source["phase"] != PROCESS_CASE):
@@ -220,8 +225,9 @@ class ProcessCasePhase(PolicyBase):
         m.intent_consumed = True
         m.extra_intents = []
         s.email["new_since"] = True
+        given = [g["topic"] for g in (results.get("get_followup_guidance") or {}).get("guidance", [])]
         for position, path in enumerate(intents):
-            entry = {"case_id": s.case_id, "intent": path, "topics": topics if position == 0 else [], "turn": s.turn}
+            entry = {"case_id": s.case_id, "intent": path, "topics": given if position == 0 else [], "turn": s.turn}
             if not any(d["case_id"] == entry["case_id"] and d["intent"] == path and d["topics"] == entry["topics"] for d in s.discussed):
                 s.discussed.append(entry)
 
@@ -338,9 +344,12 @@ class ProcessCasePhase(PolicyBase):
             else:
                 parts.append(f"Got it, claim {claim['claim_id']}, the {claim['type']} claim filed {filed}.")
 
+        if t.only_claim:
+            parts.append(f"{claim['claim_id']} is the only claim on this policy.")
         if t.uncovered:
             # One question only, and it is a yes or no: would they like a person.
             s.pending = "human_offer"
+            s.offer_reason = "uncovered"
             parts.append(
                 "I'm sorry, that's not something I can do or look up from here. A human claims representative "
                 "can help with it. Would you like me to connect you?"
@@ -380,6 +389,8 @@ class ProcessCasePhase(PolicyBase):
 
         for intent in intents:
             if intent in {"claim_status", "general_claim_question"}:
+                if re.search(r"\bfil(?:ed?|ing)\b|\bsubmitted\b|\bopened\b|\breceived\b", question.lower()):
+                    say("filed", f"Claim {claim['claim_id']} was filed on {long_date(claim['filed'])}.")
                 if denied:
                     say_denial()
                 else:
@@ -390,6 +401,7 @@ class ProcessCasePhase(PolicyBase):
                 asks_which = bool(re.search(r"\b(?:what|which)\b.*\b(?:documents?|paperwork|need|missing|required)", question.lower()))
                 if not needed:
                     say("documents", "There are no documents requested for this claim right now.")
+                    said.add("no_documents")
                 elif asks_which or not asked_topics:
                     say("documents", f"For this claim we need the {join_items(needed)}.")
             elif intent == "appeal_or_next_steps":
@@ -400,6 +412,7 @@ class ProcessCasePhase(PolicyBase):
                     say_denial()
                 else:
                     say("status", f"{status_line} Our records show no documents requested from you for this claim.")
+                    said.add("no_documents")
             elif intent == "payment_or_amounts" and payment:
                 amounts = payment["amounts"]
                 allowed, paid = amounts.get("allowed_max_amount"), amounts.get("net_pay")
@@ -420,7 +433,7 @@ class ProcessCasePhase(PolicyBase):
         if followup:
             for item in followup.get("guidance", []):
                 parts.append(item["text"])
-            if not followup.get("guidance") and followup.get("note") and "document_requirements" not in intents:
+            if not followup.get("guidance") and followup.get("note") and "no_documents" not in said:
                 parts.append(followup["note"])
 
         parts.append(closer)

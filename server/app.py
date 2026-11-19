@@ -29,7 +29,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from apps.insurance_claims import Agent
 from apps.insurance_claims.agent import MAX_INPUT_CHARS
@@ -129,7 +129,11 @@ def _state(session: Session) -> dict[str, Any]:
         "workflow": full["workflow"],
         "verified": full["verified"],
         "outbox": full["outbox"],
-        "handoff": {"ticket_id": full["handoff"]["ticket_id"]} if full["handoff"] else None,
+        "handoff": (
+            {"ticket_id": full["handoff"]["ticket_id"], "phase_at_handoff": full["handoff"].get("phase_at_handoff")}
+            if full["handoff"]
+            else None
+        ),
     }
 
 
@@ -143,17 +147,29 @@ class ChatMessage(BaseModel):
     engine: str = Field(default="auto", pattern="^(auto|offline)$")
     model: str | None = Field(default=None, max_length=80)
 
+    @field_validator("message", mode="before")
+    @classmethod
+    def _no_blank_message(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value  # spaces alone are an empty message
+
 
 @app.exception_handler(RequestValidationError)
 async def invalid_request(_request: Request, exc: RequestValidationError) -> JSONResponse:
     """One readable sentence instead of a list of validation records."""
     problems = []
     for error in exc.errors():
+        kind = str(error.get("type", ""))
         field = str(error.get("loc", ["request"])[-1])
-        if field == "message" and error.get("type") == "string_too_long":
+        if kind == "json_invalid":
+            problems.append("The request body is not valid JSON.")
+        elif kind == "missing":
+            problems.append(f"{field} is required.")
+        elif field == "message" and kind == "string_too_long":
             problems.append(f"The message is longer than {MAX_INPUT_CHARS} characters.")
-        elif field == "message":
+        elif field == "message" and kind == "string_too_short":
             problems.append("The message is empty.")
+        elif field == "message":
+            problems.append("The message must be text.")
         else:
             problems.append(f"{field}: {error.get('msg', 'invalid value')}.")
     return JSONResponse(status_code=422, content={"detail": " ".join(dict.fromkeys(problems)) or "Invalid request."})
@@ -222,8 +238,13 @@ def chat(body: ChatMessage, x_api_key: str | None = Header(default=None)) -> dic
     notice = ""
     if trace["llm_errors"]:
         first = trace["llm_errors"][0]
-        if first["stage"] == "understand":
+        if trace["engine"] == "offline":
             notice = f"Model call failed ({first['kind']}): {first['message']} This turn ran on the offline engine."
+        elif first["stage"] == "understand":
+            notice = (
+                f"Model call failed while reading the message ({first['kind']}): {first['message']} "
+                "The offline rules read it instead. The reply was still written by the model."
+            )
         else:
             notice = (
                 f"Model call failed while wording the reply ({first['kind']}): {first['message']} "

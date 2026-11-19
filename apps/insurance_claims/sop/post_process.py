@@ -24,6 +24,11 @@ from .common import (
 )
 
 EMAIL_IN_TEXT = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+OTHER_ADDRESS = re.compile(
+    r"\b(?:different|another|other|new|work|personal)\s+(?:e-?mail|address|one)\b|"
+    r"\bnot\s+(?:to\s+)?that\s+(?:address|e-?mail|one)\b|\bsomewhere\s+else\b",
+    re.I,
+)
 
 
 class PostProcessPhase(PolicyBase):
@@ -129,13 +134,14 @@ class PostProcessPhase(PolicyBase):
             )
 
         choice = u.email_summary_choice
-        if choice == "none" and s.pending == "email_offer" and u.affirmation != "none":
+        if choice == "none" and s.pending == "email_offer" and u.affirmation != "none" and not u.process_question:
             choice = "send" if u.affirmation == "yes" else "skip"
         party = self.data.party(s.party_id)
         typed = EMAIL_IN_TEXT.search(t.text)
         other_address = u.identity.get("email", "") or (typed.group(0).lower() if typed else "")
         on_file = {party.email.lower(), *(a.lower() for a in party.email_aliases)} if party else set()
-        if other_address and other_address.lower() not in on_file and choice != "skip":
+        elsewhere = bool(other_address and other_address.lower() not in on_file) or bool(OTHER_ADDRESS.search(t.text))
+        if elsewhere and choice != "skip":
             s.pending = "email_offer"
             return self._directive(
                 s, t, "EMAIL_ADDRESS_FIXED",
@@ -226,6 +232,7 @@ class PostProcessPhase(PolicyBase):
             )
         if u.emotion != "neutral" or u.process_question:
             s.pending = "human_offer"
+            s.offer_reason = "concern"
             return self._directive(
                 s, t, "CLOSED_CONCERN",
                 goal="The conversation was wrapped up, and the caller has come back unhappy or with a concern. Acknowledge it and ask whether they would like a human representative.",

@@ -229,17 +229,22 @@ class MeteredLLM:
         if self.meter.exhausted:
             raise LLMError("budget", "Spending cap reached. No further model calls are made.")
 
-    def complete_json(self, **kwargs: Any) -> LLMResult:
+    def _metered(self, call: Callable[..., LLMResult], **kwargs: Any) -> LLMResult:
         self._guard()
-        result = self.inner.complete_json(**kwargs)
+        try:
+            result = call(**kwargs)
+        except LLMError as exc:
+            if exc.result is not None:  # answered and billed, then judged a failure: it still counts
+                self.turn_cost += self.meter.add(exc.result, self.inner.model)
+            raise
         self.turn_cost += self.meter.add(result, self.inner.model)
         return result
 
+    def complete_json(self, **kwargs: Any) -> LLMResult:
+        return self._metered(self.inner.complete_json, **kwargs)
+
     def complete_text(self, **kwargs: Any) -> LLMResult:
-        self._guard()
-        result = self.inner.complete_text(**kwargs)
-        self.turn_cost += self.meter.add(result, self.inner.model)
-        return result
+        return self._metered(self.inner.complete_text, **kwargs)
 
 
 def load_key(env_file: str | None) -> str:

@@ -44,10 +44,11 @@ MODELS_WITH_SERVER_FALLBACK = {
 class LLMError(Exception):
     """A model call failed. ``kind`` is stable and safe to show to a tester."""
 
-    def __init__(self, kind: str, message: str):
+    def __init__(self, kind: str, message: str, result: "LLMResult | None" = None):
         super().__init__(message)
         self.kind = kind
         self.message = message
+        self.result = result  # set when the API answered (and billed) before the call was judged a failure
 
     @property
     def fatal_for_turn(self) -> bool:
@@ -128,9 +129,9 @@ class AnthropicLLM:
         try:
             data = json.loads(result.text)
         except json.JSONDecodeError as exc:
-            raise LLMError("bad_output", "The model did not return valid JSON.") from exc
+            raise LLMError("bad_output", "The model did not return valid JSON.", result) from exc
         if not isinstance(data, dict):
-            raise LLMError("bad_output", "The model returned JSON that is not an object.")
+            raise LLMError("bad_output", "The model returned JSON that is not an object.", result)
         result.data = data
         return result
 
@@ -165,13 +166,7 @@ class AnthropicLLM:
         except (AttributeError, TypeError) as exc:
             # A gateway in front of the API answered 200 with something that is not a message.
             raise LLMError("bad_output", "The model endpoint returned a response that is not a message.") from exc
-        if stop_reason == "refusal":
-            raise LLMError("refusal", "The model declined this request.")
-        if stop_reason == "max_tokens":
-            raise LLMError("truncated", "The model reply was cut off by max_tokens.")
-        if not text:
-            raise LLMError("empty", "The model returned no text.")
-        return LLMResult(
+        result = LLMResult(
             text=text,
             model=getattr(response, "model", self.model) or self.model,
             input_tokens=getattr(usage, "input_tokens", 0) or 0,
@@ -179,6 +174,14 @@ class AnthropicLLM:
             cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
             cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
         )
+        # These calls were answered and billed, so the usage travels with the error.
+        if stop_reason == "refusal":
+            raise LLMError("refusal", "The model declined this request.", result)
+        if stop_reason == "max_tokens":
+            raise LLMError("truncated", "The model reply was cut off by max_tokens.", result)
+        if not text:
+            raise LLMError("empty", "The model returned no text.", result)
+        return result
 
     def _send(self, kwargs: dict[str, Any]) -> Any:
         sdk = self._sdk

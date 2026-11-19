@@ -76,7 +76,7 @@ def test_a_clear_yes_at_the_email_offer_sends(agent: Agent, text: str):
 def test_questions_about_the_summary_are_answered_at_the_offer(agent: Agent, text: str):
     c = at_email_offer(agent)
     reply = c.say(text)
-    assert c.act == "EMAIL_OFFER_REPEAT" and not c.s.outbox
+    assert c.act in {"EMAIL_OFFER_REPEAT", "EMAIL_ADDRESS_FIXED"} and not c.s.outbox and c.s.phase == POST_PROCESS
     assert "address on file" in reply and "denied because" not in reply
 
 
@@ -245,11 +245,20 @@ def test_clarification_questions_are_answered_not_declined(convo: Convo, text: s
 @pytest.mark.parametrize(
     "text",
     ["I got a bill from the hospital, can you help me with that?", "why did you reject my MRI?",
-     "can you look up my bill?", "do you handle dental?", "do you like pizza?", "how are you?"],
+     "can you look up my bill?", "do you handle dental?", "how are you?", "can I do it later?", "what's going on?"],
 )
-def test_an_unclear_question_before_verification_is_never_counted_as_out_of_scope(convo: Convo, text: str):
+def test_a_claims_question_before_verification_is_never_counted_as_out_of_scope(convo: Convo, text: str):
     reply = convo.say(text)
-    assert convo.act == "VERIFY_ASK" and convo.s.oos_streak == 0 and "verify your identity" in reply
+    assert convo.act in {"VERIFY_ASK", "VERIFY_EXPLAIN"} and convo.s.oos_streak == 0 and "full name" in reply
+
+
+def test_unrelated_questions_before_verification_are_declined_counted_and_end_with_a_person(convo: Convo):
+    acts = []
+    for text in ("Do you know any good jokes?", "What's your favorite color?", "Can you play music?", "Are aliens real?"):
+        reply = convo.say(text)
+        acts.append(convo.act)
+        assert_no_leak(reply)
+    assert acts == ["OOS_DECLINE", "OOS_DECLINE", "OOS_OFFER_HUMAN", "ESCALATED"] and convo.s.phase == ESCALATED
 
 
 def test_four_clarifications_in_a_row_do_not_transfer_the_caller(convo: Convo):
@@ -638,7 +647,7 @@ def _guard(verified: Convo, reply: str, facts: dict | None = None, fallback: str
         ("Your claim CL-9999 is open.", "ungrounded claim id"),
         ("We paid 780 dollars on it.", "ungrounded amount"),
         ("The deadline is the 2nd of April.", "ungrounded date"),
-        ("You have 45 days to respond.", "ungrounded number of days"),
+        ("You have 45 days to respond.", "ungrounded length of time"),
         ("I've sent the summary to you.", "claims something was sent"),
         ("I'm transferring you now.", "claims a transfer"),
         ("It will be approved once we get the report.", "promises an outcome"),

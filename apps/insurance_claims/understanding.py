@@ -87,7 +87,8 @@ class Understanding:
     done: bool = False
     more: bool = False                 # has something else to ask, not asked yet ("wait, one more thing")
     notes: list[str] = field(default_factory=list)
-    guessed: list[str] = field(default_factory=list)  # identity fields the offline rules only inferred
+    guessed: list[str] = field(default_factory=list)  # what the offline rules only inferred (a name, the caller's role)
+    partial: list[str] = field(default_factory=list)  # identity details given incompletely ("March 15", a bare year)
     source: str = "rules"
 
     def to_dict(self) -> dict[str, Any]:

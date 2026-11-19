@@ -75,7 +75,10 @@ def find_dates(text: str) -> list[tuple[int | None, int, int, tuple[int, int]]]:
     for m in _DMY_RE.finditer(text):
         add(int(m.group(3)), MONTHS[m.group(2).lower().rstrip(".")], int(m.group(1)), m.span())
     for m in _NUM_RE.finditer(text):
-        add(_expand_year(int(m.group(3))), int(m.group(1)), int(m.group(2)), m.span())
+        first, second = int(m.group(1)), int(m.group(2))
+        if first > 12 >= second:
+            first, second = second, first  # 21/08/1990 can only be day first
+        add(_expand_year(int(m.group(3))), first, second, m.span())
     for m in _MD_RE.finditer(text):
         add(None, MONTHS[m.group(1).lower().rstrip(".")], int(m.group(2)), m.span())
     for m in _DM_RE.finditer(text):

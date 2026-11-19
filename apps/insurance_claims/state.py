@@ -30,6 +30,7 @@ class Memory:
     identity: dict[str, str] = field(default_factory=dict)
     declined: list[str] = field(default_factory=list)
     caller_role: str = "unknown"
+    role_guessed: bool = False         # the role was inferred from wording, not stated
     representative_name: str = ""
     intent: str = "none"
     extra_intents: list[str] = field(default_factory=list)
@@ -59,8 +60,10 @@ class Session:
     identity_ok: bool = False
     party_id: str | None = None
     verification: dict[str, Any] = field(default_factory=dict)
+    candidate_id: str | None = None    # the record the caller's details have been matching so far
     failed_attempts: int = 0
     name_misses: int = 0
+    rep_name_refused: str = ""         # a representative name that was not on the policy
     refusal_count: int = 0
     rep_denials: int = 0
     consent: dict[str, Any] = field(
@@ -69,6 +72,7 @@ class Session:
 
     # conversation control
     pending: str = "identity"
+    offer_reason: str = ""             # why a human was last offered: "dead_end" when nothing else can be done here
     oos_streak: int = 0
     oos_total: int = 0
     distress_streak: int = 0

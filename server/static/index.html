@@ -349,7 +349,7 @@
     const message = (text || "").trim();
     if (!message || app.busy) return false;
     if (!app.sessionId) { await newConversation(); if (!app.sessionId) return false; }
-    addMessage("caller", message);
+    const bubble = addMessage("caller", message);
     setBusy(true);
     const typing = addMessage("agent typing", "…");
     try {
@@ -379,6 +379,7 @@
       return true;
     } catch (error) {
       typing.remove();
+      if (error.status === 404 || error.status === 422) bubble.remove();  // it was never accepted as a turn
       addNote(error.status === 404 || error.status === 422 ? error.message : "Something went wrong: " + error.message, true);
       return false;
     } finally {
@@ -423,8 +424,10 @@
     const terminal = state.phase === "CLOSED" || state.phase === "ESCALATED";
     let current = workflow.indexOf(state.phase);
     if (state.phase === "CLOSED") current = workflow.length;
-    if (state.phase === "ESCALATED" && state.handoff && state.handoff.phase_at_handoff) {
-      current = workflow.indexOf(state.handoff.phase_at_handoff);
+    if (state.phase === "ESCALATED") {
+      const at = state.handoff && state.handoff.phase_at_handoff;
+      // handed off after closing: every step was completed. Unknown: at least verification, if it passed.
+      current = at === "CLOSED" ? workflow.length : workflow.indexOf(at) >= 0 ? workflow.indexOf(at) : (state.verified ? 1 : 0);
     }
     workflow.forEach(function (phase, index) {
       const stopped = state.phase === "ESCALATED" && index === current;

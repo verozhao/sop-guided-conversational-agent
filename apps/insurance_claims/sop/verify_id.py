@@ -13,6 +13,7 @@ listed on the policy and the policyholder has approved).
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sop_harness.core import Directive
@@ -33,6 +34,22 @@ from .common import (
     TurnCtx,
     count_phrase,
 )
+
+# A detail given only in part is neither accepted nor counted as wrong. The caller is told what is missing.
+PARTIAL_NOTES = {
+    "dob": " For the date of birth I'll need the full date, with the day, the month and the year.",
+    "dob_or_id": (
+        " I wasn't sure whether that number is a year of birth or the last four digits of an SSN or ID, so I "
+        "haven't used it. A date of birth needs the full date, and for the ID just tell me it's the last four digits."
+    ),
+    "phone": " That phone number looks incomplete, so please give the full number with the area code.",
+}
+PARTIAL_LABELS = {
+    "dob": "a date of birth without the full day, month and year",
+    "dob_or_id": "a four-digit number that could be a year of birth or the last four digits of an ID",
+    "phone": "a phone number with digits missing",
+}
+REP_NAME_WHY = "Only a representative who is listed on the policy can be approved, so I need your own name to check that."
 
 
 class VerifyIdPhase(PolicyBase):
@@ -56,14 +73,23 @@ class VerifyIdPhase(PolicyBase):
 
     def _verify(self, s: Session, u: Understanding, t: TurnCtx) -> Directive | None:
         m = s.memory
-        result = verify_identity(self.data, m.identity)
-        if "full_name" in result.conflicts and "full_name" in u.guessed and s.name_misses < MAX_NAME_MISSES:
+        guess = "full_name" in u.guessed and "full_name" in t.new_identity
+        if guess and s.name_misses >= MAX_NAME_MISSES:
+            # The allowance for guessed names is spent: a guess is no longer tried at all,
+            # so it can neither probe the records nor count against the caller.
+            m.identity.pop("full_name", None)
+            t.new_identity = [f for f in t.new_identity if f != "full_name"]
+            guess = False
+        result = verify_identity(self.data, m.identity, prefer=s.candidate_id)
+        if guess and "full_name" in result.conflicts:
             # A short reply the offline rules took for a name. It matches nobody, so it was
             # probably not a name: drop it without comment. The allowance is limited.
             s.name_misses += 1
             m.identity.pop("full_name", None)
             t.new_identity = [f for f in t.new_identity if f != "full_name"]
-            result = verify_identity(self.data, m.identity)
+            result = verify_identity(self.data, m.identity, prefer=s.candidate_id)
+        if result.record is not None:
+            s.candidate_id = result.record.party_id
         s.verification = result.summary()
         s.identity_ok = result.verified
         s.party_id = result.record.party_id if result.verified and result.record else None
@@ -153,7 +179,9 @@ class VerifyIdPhase(PolicyBase):
                     act="VERIFY_LOCKED",
                 )
             bad = [SHORT_LABELS[f] for f in result.conflicts]
-            if result.record is None:
+            if is_rep:
+                text = "One or more of the details you gave don't match our records."
+            elif result.record is None:
                 text = "I wasn't able to find a match with the details you gave me."
             elif matched:
                 text = (
@@ -162,27 +190,54 @@ class VerifyIdPhase(PolicyBase):
                 )
             else:
                 text = f"I wasn't able to match the {join_items(bad)} you gave me with our records."
-            text += " Could you double-check that"
-            if alternatives:
-                text += f", or give me a different detail instead, such as {self._labels(s, alternatives, 'or')}"
-            text += "?"
+            if is_rep:
+                text += " Could you double-check them, or give me a different detail instead?"
+            else:
+                text += " Could you double-check that"
+                if alternatives:
+                    text += f", or give me a different detail instead, such as {self._labels(s, alternatives, 'or')}"
+                text += "?"
             if left == 1:
                 text += " For your security, I can try this one more time before I pass you to a representative."
-            facts["verification"]["details_that_did_not_match"] = bad
             facts["verification"]["attempts_left"] = left
+            if is_rep:
+                goal = "One or more details the caller gave do not match the records. Say so without saying which, and ask them to re-check or use a different detail."
+                first_point = "Say that one or more details did not match. Do not say which matched and which did not."
+            else:
+                facts["verification"]["details_that_did_not_match"] = bad
+                goal = "Some of the details the caller gave do not match the records. Say which ones, without revealing what is on file, and ask them to re-check or use a different detail."
+                first_point = "Name the details that did not match."
             return self._directive(
                 s, t, "VERIFY_MISMATCH",
-                goal="Some of the details the caller gave do not match the records. Say which ones, without revealing what is on file, and ask them to re-check or use a different detail.",
+                goal=goal,
                 fallback=text,
                 facts=facts,
                 cover=[
-                    "Name the details that did not match.",
+                    first_point,
                     "Invite the caller to double-check them or to give a different accepted detail.",
                 ] + (["Say that one more attempt is possible before a representative has to take over."] if left == 1 else []),
+                must_not=rep_rules,
             )
 
         # 2. The caller has ruled out too many details to ever reach three.
         if len(matched) + len(remaining) < REQUIRED_MATCHES:
+            if u.process_question and not u.declined_fields and not u.refuses_verification:
+                return self._directive(
+                    s, t, "VERIFY_EXPLAIN",
+                    goal="Answer the caller's question about the process from facts.process. Then say that three details are still needed and that what is left is not enough, and offer the two ways forward.",
+                    fallback=(
+                        f"{self._explain_line(s, t)} I do need three details in total, and with what's left I "
+                        f"can't get there. You can share one you set aside after all, or I can connect you with a "
+                        f"human representative."
+                    ),
+                    facts=facts,
+                    cover=[
+                        "Answer the process question directly.",
+                        "Say three details are needed and the remaining ones are not enough.",
+                        "Offer the choice: reconsider a declined detail, or a human representative.",
+                    ],
+                    must_not=rep_rules,
+                )
             s.refusal_count += 1
             if s.refusal_count > MAX_PERSUASION:
                 return self._escalate(
@@ -206,6 +261,7 @@ class VerifyIdPhase(PolicyBase):
                     "Explain that three details are required and why.",
                     "Offer the choice: reconsider one of the declined details, or a human representative.",
                 ],
+                must_not=rep_rules,
             )
 
         # 3. The caller refuses or pushes back, and gave nothing new.
@@ -219,6 +275,8 @@ class VerifyIdPhase(PolicyBase):
             ask = self._ask_identity(s, matched, remaining)
             if s.refusal_count == 1:
                 credit = f"You're right that you've given me {self._labels(s, matched)}, thank you. " if matched else ""
+                if not t.empathy:
+                    credit = "I understand, and it's sensible to be careful with personal details. " + credit
                 text = (
                     f"{credit}Your claim file holds private health and financial information, so I have to "
                     f"confirm it's really you before I can share anything from it, including the reason for a "
@@ -268,10 +326,12 @@ class VerifyIdPhase(PolicyBase):
                 fallback=f"{self._explain_line(s, t)} {ask}",
                 facts=facts,
                 cover=["Answer the process question directly.", "Then ask for the identity details still needed."],
+                must_not=rep_rules,
             )
 
         # 5. Progress, or a specific detail was declined.
-        if new_pii or u.declined_fields or result.incomplete:
+        incomplete_now = [f for f in result.incomplete if f in t.new_identity]
+        if new_pii or u.declined_fields or incomplete_now or u.partial:
             opener = "Thank you."
             if u.has_request:
                 opener += " I can help with that as soon as we've finished verifying."
@@ -281,7 +341,13 @@ class VerifyIdPhase(PolicyBase):
                 opener += f" I've {'noted' if is_rep else 'confirmed'} {self._labels(s, matched)}."
             if result.incomplete:
                 opener += " For the name to count I'll need the full first and last name."
+            for kind in u.partial:
+                opener += PARTIAL_NOTES[kind]
+            if u.partial:
+                facts["verification"]["given_incompletely"] = [PARTIAL_LABELS[kind] for kind in u.partial]
             cover = ["Acknowledge what the caller just gave or declined.", "Ask for what is still needed, offering the remaining choices."]
+            if u.partial:
+                cover.insert(1, "Say what was incomplete about the detail they gave (facts.verification.given_incompletely) and what is needed instead.")
             cover += rep_cover
             if u.process_question:
                 opener = f"{self._explain_line(s, t)} {opener}"
@@ -359,18 +425,67 @@ class VerifyIdPhase(PolicyBase):
                 fixed=True,
             )
         if not m.representative_name:
+            asked_before = s.pending == "rep_name"
             s.pending = "rep_name"
+            facts["representative"] = {**CONSENT_FACTS, "why_the_callers_name_is_needed": REP_NAME_WHY}
+            pushing = u.refuses_verification or "full_name" in u.declined_fields or (asked_before and u.affirmation == "no")
+            if pushing:
+                s.refusal_count += 1
+                if s.refusal_count > MAX_PERSUASION:
+                    return self._escalate(
+                        s, t, "representative declined to give their own name",
+                        lead="I understand, and I won't keep pressing you.",
+                    )
+                return self._directive(
+                    s, t, "REP_NAME_PERSUADE",
+                    goal="The caller does not want to give their own name. Explain why it is needed, without pressure, and offer the alternatives.",
+                    fallback=(
+                        f"I understand. {REP_NAME_WHY} Without it I can't share anything about the claim. "
+                        f"{Holder} can also call us directly, or I can connect you with a human representative. "
+                        f"Could I have your full name?"
+                    ),
+                    facts=facts,
+                    cover=[
+                        "Acknowledge the caller's reluctance.",
+                        "Explain why their own name is needed (facts.representative.why_the_callers_name_is_needed).",
+                        "Mention the alternatives: the policyholder can call directly, or a human representative.",
+                        "Ask once more for their full name.",
+                    ],
+                    rules=REP_GATE_RULES,
+                )
+            if u.process_question:
+                return self._directive(
+                    s, t, "ASK_REP_NAME",
+                    goal="The caller asked about this step. Answer from facts.representative, then ask for their own full name.",
+                    fallback=f"{self._explain_line(s, t)} May I have your full name?",
+                    facts=facts,
+                    cover=["Answer the caller's question about this step.", "Ask for the caller's own full name."],
+                    rules=REP_GATE_RULES,
+                )
+            if asked_before and re.fullmatch(r"\W*[A-Za-z][A-Za-z\-]{1,20}\W*", t.text) and u.affirmation == "none":
+                text = "Thank you. I need your first and last name, please."
+            elif asked_before:
+                text = "I still need your own full name before I can go on. What is it, please?"
+            else:
+                text = "Thank you. Since you're calling on someone else's behalf, may I have your own full name as well?"
             return self._directive(
                 s, t, "ASK_REP_NAME",
                 goal="The caller is calling for someone else and has not given their own name. Ask for it.",
-                fallback="Thank you. Since you're calling on someone else's behalf, may I have your own full name as well?",
+                fallback=text,
                 facts=facts,
-                cover=["Ask for the caller's own full name."],
+                cover=["Ask for the caller's own full name, first and last."],
                 rules=REP_GATE_RULES,
             )
 
         rep_first = m.representative_name.split()[0]
+        if s.rep_name_refused and s.rep_name_refused.lower() != m.representative_name.lower():
+            # Told they are not on the policy, the caller now gives another name.
+            return self._escalate(
+                s, t, "caller gave a different name after not being found as an authorized representative",
+                lead="Thank you. Since the name has changed, a person needs to confirm who is calling before anything can be shared.",
+            )
         if self.data.find_representative(s.party_id, m.representative_name) is None:
+            s.rep_name_refused = m.representative_name
             s.rep_denials += 1
             if s.rep_denials >= 2:
                 return self._escalate(
@@ -378,6 +493,7 @@ class VerifyIdPhase(PolicyBase):
                     lead="I understand this is frustrating.",
                 )
             s.pending = "human_offer"
+            s.offer_reason = "dead_end"
             facts["caller_is_an_authorized_representative"] = False
             return self._directive(
                 s, t, "REP_NOT_AUTHORIZED",
@@ -457,6 +573,7 @@ class VerifyIdPhase(PolicyBase):
                 lead="I'm not able to request consent again from here, so a person will take this forward.",
             )
         s.pending = "human_offer"
+        s.offer_reason = "dead_end"
         happened = "was declined" if status == "denied" else "has expired without an answer"
         return self._directive(
             s, t, "CONSENT_NOT_GIVEN",
