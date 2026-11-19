@@ -185,6 +185,7 @@ class ProcessCasePhase(PolicyBase):
             topics = list(dict.fromkeys(m.pending_topics + u.followup_topics))
             if m.pending_topics:
                 t.trace.memory_used.append(f"follow-up topics {m.pending_topics} noted earlier")
+            t.uncovered = primary == "none" and not topics and u.asks_about_claim
             intents = paths_for(primary, extra, bool(topics))
         m.backlog_question = ""
         m.pending_topics = []
@@ -332,7 +333,7 @@ class ProcessCasePhase(PolicyBase):
             else:
                 parts.append(f"Got it, claim {claim['claim_id']}, the {claim['type']} claim filed {filed}.")
 
-        if t.uncovered and not t.case_just_resolved:
+        if t.uncovered:
             # One question only, and it is a yes or no: would they like a person.
             s.pending = "human_offer"
             parts.append(

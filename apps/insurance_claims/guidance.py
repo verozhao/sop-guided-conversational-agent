@@ -43,11 +43,16 @@ def render_followup(guide: dict[str, Any], claim: dict[str, Any], topics: list[s
         "average_processing_time_after_submission": text(settings.get("average_processing_time_after_submission")),
     }
     rows = {row["topic"]: row for row in guide.get("claim_followup_guidance", [])}
-    return [
-        {"topic": topic, "text": text(rows[topic]).format(**values)}
-        for topic in dict.fromkeys(topics)
-        if topic in rows
-    ]
+
+    def fill(template: str) -> str:
+        out = template.format(**values)
+        if len(needed) == 1:
+            # The guideline sentences are written for several documents. With one, the verb agrees.
+            for plural, singular in ((" stay ", " stays "), (" are ", " is "), (" were ", " was ")):
+                out = out.replace(values["documents"] + plural, values["documents"] + singular)
+        return out
+
+    return [{"topic": topic, "text": fill(text(rows[topic]))} for topic in dict.fromkeys(topics) if topic in rows]
 
 
 def human_review_note(guide: dict[str, Any]) -> str:

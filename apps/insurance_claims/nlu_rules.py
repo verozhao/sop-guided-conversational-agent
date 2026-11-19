@@ -426,9 +426,12 @@ EMAIL_NEGATED_RE = re.compile(
 )
 EMAIL_SEND_RE = re.compile(r"\bsend\b|\be-?mail\s+(?:it|me|that)\b|\bforward\b|\bgo\s+ahead\b", _I)
 EMAIL_REQUEST_RE = re.compile(
-    r"^\W*(?:(?:yes|yeah|sure|ok|okay)[\s,]+)?(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:just\s+)?(?:send|e-?mail|forward)\b",
+    r"^\W*(?:(?:yes|yeah|sure|ok|okay)[\s,]+)?(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:just\s+)?(?:send|e-?mail|forward)\b|"
+    r"^\W*(?:can|could|may)\s+i\s+(?:please\s+)?(?:still\s+)?(?:get|have)\b[^?]{0,25}\b(?:summary|recap)\b",
     _I,
 )
+# "I'd like the summary after all" asks for it without the word send.
+EMAIL_WISH_RE = re.compile(r"\b(?:want|like|need|get|have|take)\b[^.?!]{0,25}\b(?:summary|recap)\b", _I)
 NOT_SKIP_RE = re.compile(r"\b(?:don't|do\s+not|dont|not)\s+skip(?:\s+(?:it|that))?\b", _I)
 ADDRESS_CHANGE_RE = re.compile(
     r"\b(?:different|another|other|new|work|personal)\s+(?:e-?mail|address)\b|\binstead\b|\bthat\s+address\b|"
@@ -440,7 +443,9 @@ EMAIL_VOLUNTEER_RE = re.compile(
     r"\bno\s+e-?mails?\b|\bdon't\s+e-?mail\b",
     _I,
 )
-CLOSED_SEND_RE = re.compile(r"\be-?mails?\b|\bsummary\b|\brecap\b|\bsend\s+(?:it|that)\b", _I)
+EMAIL_WORDS_RE = re.compile(r"\be-?mails?\b|\bsummary\b|\brecap\b|\bsend\s+(?:it|that)\b", _I)
+# After closing, only wording that can mean nothing but the summary reopens the choice.
+CLOSED_SEND_RE = re.compile(r"\bsummary\b|\brecap\b|\b(?:send|e-?mail|forward)\s+(?:it|that)\b", _I)
 
 # --------------------------------------------------------------------------- scope
 
@@ -457,7 +462,7 @@ CLAIMISH_RE = re.compile(
     r"decision|approv\w*|reject\w*|den(?:y|ies)|cover(?:s|ing)?|pay(?:ing|ments?)?|paid|owe[ds]?|charge[ds]?|refund|"
     r"copay|co-pay|out\s+of\s+pocket|in-?network|plan|member|expedite|rush|urgent|complain\w*|submit\w*|upload\w*|"
     r"hear\s+back|call(?:ed)?\s+(?:me\s+)?back|contact\s+(?:me|you)|healthcare|health\s?care|medical|dental|auto|"
-    r"vehicle|car|(?:phone|contact|fax)\s+number|i\s+can\s+call|customer\s+service|office|in\s+person|"
+    r"vehicle|car|forms?|(?:phone|contact|fax)\s+number|i\s+can\s+call|customer\s+service|office|in\s+person|"
     r"human|person|agent|supervisor|manager|transfer(?:red)?)\b",
     _I,
 )
@@ -592,7 +597,7 @@ def _email_choice(low: str, polarity: str, at_offer: bool, question_like: bool) 
     text = NOT_SKIP_RE.sub(" send it ", low)  # "don't skip it" asks for it
     skip = bool(EMAIL_NEGATED_RE.search(text))
     rest = EMAIL_NEGATED_RE.sub(" ", text)
-    send = bool(EMAIL_SEND_RE.search(rest))
+    send = bool(EMAIL_SEND_RE.search(rest) or EMAIL_WISH_RE.search(rest))
     if skip and send:
         return "none"
     if skip:
@@ -751,7 +756,8 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
         elif "document_requirements" not in matched:
             matched.append("document_requirements")
     # "send it" at the email offer is about the email, not about documents
-    if "document_requirements" in matched and (pending == "email_offer" or re.search(r"\be-?mails?\b|\bsummary\b|\brecap\b", low)):
+    summary_open = pending == "email_offer" or (phase == CLOSED and not session.outbox)
+    if "document_requirements" in matched and (summary_open or re.search(r"\be-?mails?\b|\bsummary\b|\brecap\b", low)):
         if not re.search(INTENT_RULES[2][1], EMAILISH_RE.sub(" ", low)):
             matched.remove("document_requirements")
 
@@ -880,8 +886,11 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
     if at_offer and (ADDRESS_CHANGE_RE.search(low) or u.process_question):
         u.process_question = True  # a question about the summary, not a choice
         matched = [i for i in matched if re.search(r"\bdocuments?\b|\bclaims?\b", low)]
-    elif at_offer or (phase == CLOSED and not session.outbox and CLOSED_SEND_RE.search(low)):
-        if not asks and not u.more:
+    elif at_offer or phase == CLOSED:
+        # After closing, only wording that names the summary reopens the choice. A preference
+        # is never read there, because in CLOSED a "send" is an action.
+        reopen = phase == CLOSED and not session.outbox and bool(CLOSED_SEND_RE.search(low))
+        if (at_offer or reopen) and not asks and not u.more:
             u.email_summary_choice = _email_choice(low, u.affirmation, at_offer, question_like)
             if u.email_summary_choice == "none" and at_offer and u.done:
                 u.email_summary_choice = "skip"  # "that's all, bye" at the offer is a no
@@ -935,8 +944,9 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
             elif unknown_question and CLAIMISH_RE.search(low):
                 u.question = text.strip()[:300]  # something to help with once verified
     elif question_like and not short_answer and not u.question and not u.process_question:
-        about_email = at_offer and bool(CLOSED_SEND_RE.search(low))
-        settled = u.email_summary_choice != "none" or u.more or u.done or u.wants_human or about_email
+        about_email = at_offer and bool(EMAIL_WORDS_RE.search(low))
+        picks_claim = bool(u.selected_case_id) or (pending == "choose_case" and bool(u.case_hints))
+        settled = u.email_summary_choice != "none" or u.more or u.done or u.wants_human or about_email or picks_claim
         if u.emotion != "confused" and not settled:
             u.question = text.strip()[:300]  # in scope, but no rule knows how to answer it
     return u

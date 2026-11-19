@@ -112,6 +112,15 @@ def test_after_closing_another_question_reopens_the_claim(agent: Agent):
     assert "March 18, 2026" in c.say("how do I appeal?") and c.s.phase == PROCESS_CASE
 
 
+def test_after_closing_only_a_request_for_the_summary_sends_it(agent: Agent):
+    for text, sent in (("can you email me the form?", 0), ("send me the documents list", 0), ("actually, send it", 1), ("I'd like the summary after all", 1)):
+        c = at_email_offer(agent)
+        c.say("no thanks")
+        assert c.s.phase == CLOSED and not c.s.outbox
+        c.say(text)
+        assert len(c.s.outbox) == sent, text
+
+
 def test_an_upset_message_after_closing_is_not_met_with_youre_welcome(agent: Agent):
     c = at_email_offer(agent)
     c.say("no thanks")
@@ -671,6 +680,14 @@ def test_guard_rejects_claims_of_access_before_verification(convo: Convo, reply:
 )
 def test_full_ssns_are_masked_whatever_the_separator(text: str, redacted: str):
     assert redact_ssn(text) == redacted
+
+
+def test_guidance_for_a_single_document_reads_correctly(agent: Agent):
+    c = Convo(agent)
+    c.say("ma tian, 1964-09-10, 6688")
+    assert c.s.case_id == "CL-3001"
+    reply = c.say("how do I submit it, and how will I know you got it?")
+    assert "the diagnosis report stays attached" in reply and "the diagnosis report was attached correctly" in reply
 
 
 def test_the_scripted_scenarios_meet_their_outcome_checks_offline():
