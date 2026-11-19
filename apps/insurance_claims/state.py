@@ -1,0 +1,101 @@
+"""Session state: the SOP position plus memory that crosses phase boundaries."""
+
+from __future__ import annotations
+
+import time
+import uuid
+from dataclasses import dataclass, field
+from typing import Any
+
+VERIFY_ID = "VERIFY_ID"
+RESOLVE_INTENT = "RESOLVE_INTENT"
+PROCESS_CASE = "PROCESS_CASE"
+POST_PROCESS = "POST_PROCESS"
+CLOSED = "CLOSED"
+ESCALATED = "ESCALATED"
+
+WORKFLOW_PHASES = [VERIFY_ID, RESOLVE_INTENT, PROCESS_CASE, POST_PROCESS]
+ALL_PHASES = WORKFLOW_PHASES + [CLOSED, ESCALATED]
+
+
+@dataclass
+class Memory:
+    """Slots filled whenever the caller says something useful, in any phase.
+
+    A slot that belongs to a later phase is stored now and consumed when the
+    workflow gets there. ``captured`` logs where each slot came from so the
+    inspector can show memory crossing a phase boundary.
+    """
+
+    identity: dict[str, str] = field(default_factory=dict)
+    declined: list[str] = field(default_factory=list)
+    caller_role: str = "unknown"
+    representative_name: str = ""
+    intent: str = "none"
+    intent_consumed: bool = False
+    case_hints: dict[str, Any] = field(default_factory=dict)
+    hints_consumed: bool = False
+    backlog_question: str = ""
+    pending_topics: list[str] = field(default_factory=list)
+    email_pref: str = "none"
+    notes: list[str] = field(default_factory=list)
+    last_emotion: str = "neutral"
+    captured: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def remember(self, slot: str, turn: int, phase: str) -> None:
+        self.captured[slot] = {"turn": turn, "phase": phase}
+
+
+@dataclass
+class Session:
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    phase: str = VERIFY_ID
+    turn: int = 0
+    memory: Memory = field(default_factory=Memory)
+
+    # identity and authorisation
+    verified: bool = False
+    identity_ok: bool = False
+    party_id: str | None = None
+    verification: dict[str, Any] = field(default_factory=dict)
+    failed_attempts: int = 0
+    refusal_count: int = 0
+    rep_denials: int = 0
+    consent: dict[str, Any] = field(
+        default_factory=lambda: {"scenario": "default", "status": None, "polls": 0, "exhausted": False, "timeouts": 0}
+    )
+
+    # conversation control
+    pending: str = "identity"
+    human_offer_open: bool = False
+    oos_streak: int = 0
+    oos_total: int = 0
+    distress_streak: int = 0
+    distress_offer_made: bool = False
+    last_empathy: str = ""
+
+    # case handling
+    case_id: str | None = None
+    last_candidates: list[str] = field(default_factory=list)
+    last_intent: str = "none"
+    discussed: list[dict[str, Any]] = field(default_factory=list)
+
+    # post process
+    email: dict[str, Any] = field(default_factory=lambda: {"decision": None, "reasks": 0, "new_since": False})
+    outbox: list[dict[str, Any]] = field(default_factory=list)
+    handoff: dict[str, Any] | None = None
+
+    history: list[dict[str, Any]] = field(default_factory=list)
+    traces: list[dict[str, Any]] = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+    def say(self, role: str, text: str) -> None:
+        self.history.append({"role": role, "text": text, "turn": self.turn})
+        self.updated_at = time.time()
+
+    def recent_history(self, limit: int = 12) -> list[dict[str, Any]]:
+        return self.history[-limit:]
+
+    def caller_texts(self) -> list[str]:
+        return [item["text"] for item in self.history if item["role"] == "caller"]
