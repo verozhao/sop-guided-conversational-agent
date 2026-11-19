@@ -46,12 +46,12 @@ caller_role
   policyholder if they say or clearly imply the policy is their own. representative if they are calling for someone else (a parent, spouse, client). Otherwise unknown.
 
 identity (only values stated or corrected in THIS message)
-  full_name is the POLICYHOLDER's name. When the caller is a representative, their own name goes in representative_name and the person they are calling about goes in full_name.
+  full_name is the POLICYHOLDER's name. When the caller is a representative, their own personal name goes in representative_name (a name, never a description such as "her lawyer") and the person they are calling about goes in full_name.
   dob as YYYY-MM-DD; read numeric dates as month/day/year. phone as digits only. id_last4 as exactly four digits; if a longer ID number is given keep only its last four. A marker like "[SSN ending 1234]" means id_last4 is 1234.
   When the agent has just asked for identity details, a bare answer such as "4472" or "Margaret Chen" is that detail.
 
 declined_fields
-  Identity fields the caller says they will not or cannot give ("I don't have my SSN on me", "I'd rather not share my phone number").
+  Specific identity fields the caller says they will not or cannot give ("I don't have my SSN on me", "I'd rather not share my phone number"). List only fields the caller named. A refusal to give anything at all is refuses_verification with declined_fields left empty.
 
 refuses_verification
   true when the caller refuses to verify at all, insists they already did, or demands claim information without verifying. A neutral question about why verification is needed is process_question, not a refusal. false whenever the message supplies an identity detail.
@@ -95,13 +95,13 @@ affirmation
   yes or no when the message answers the agent's last question that way. none otherwise.
 
 email_summary_choice
-  send if the caller asks for or accepts an email summary of the call. skip if they decline it or say they do not want email. This applies at any point in the call. none otherwise. Giving an email address to identify themselves is not a choice.
+  send if THIS message asks for or accepts an email summary of the call. skip if this message declines it or says they do not want email. It can happen at any point in the call, but report it only for the message that says it. Do not repeat a choice from an earlier message. none otherwise. Giving an email address to identify themselves is not a choice.
 
 done
   true when the caller signals they need nothing more ("that's all", "no thanks" in reply to "anything else?", goodbye).
 
 notes
-  Other facts worth remembering later that fit no field above, each as one short sentence (for example "Caller says the lab closed and cannot reissue the report"). [] if none."""
+  Facts worth remembering later that no field above captures, each as one short sentence (for example "Caller says the lab closed and cannot reissue the report"). Do not restate what the other fields already say and do not describe the message. Usually []."""
 
 
 def _escape(text: str) -> str:

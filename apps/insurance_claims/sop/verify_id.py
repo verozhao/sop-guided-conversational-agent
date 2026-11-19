@@ -150,12 +150,15 @@ class VerifyIdPhase(PolicyBase):
                     lead="I understand, and I won't keep pressing you.",
                 )
             s.human_offer_open = True
+            shortfall = REQUIRED_MATCHES - len(matched) - len(remaining)
+            how_many = "one" if shortfall == 1 else f"at least {['', 'one', 'two', 'three'][min(shortfall, 3)]}"
+            facts["verification"]["declined_details_needed_after_all"] = shortfall
             return self._directive(
                 s, t, "VERIFY_IMPOSSIBLE",
                 goal="With the details the caller has declined, three matching details can no longer be reached. Explain that kindly and offer the two ways forward.",
                 fallback=(
                     f"I understand you'd rather not share some of those. I do need three details in total to "
-                    f"verify {who}, and with what's left I can't get there. Would you be willing to share one "
+                    f"verify {who}, and with what's left I can't get there. Would you be willing to share {how_many} "
                     f"of them after all, or would you like me to connect you with a human representative?"
                 ),
                 facts=facts,

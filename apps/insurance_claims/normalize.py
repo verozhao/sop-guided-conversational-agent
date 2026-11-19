@@ -102,6 +102,7 @@ _HONORIFICS = {"mr", "mrs", "ms", "miss", "dr", "mx"}
 def name_tokens(text: str) -> list[str]:
     plain = unicodedata.normalize("NFKD", text or "")
     plain = "".join(ch for ch in plain if not unicodedata.combining(ch)).lower()
+    plain = re.sub(r"['\u2019]s\b", "", plain)  # "Margaret Chen's" is Margaret Chen
     plain = re.sub(r"[^a-z\s]", " ", plain)
     return [tok for tok in plain.split() if tok not in _HONORIFICS]
 

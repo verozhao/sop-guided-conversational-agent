@@ -129,7 +129,11 @@ class PostProcessPhase(PolicyBase):
                 ],
                 must_not=["Do not send or claim to have sent anything yet.", "Do not repeat the address the caller gave."],
             )
-        if choice == "none" and self._has_request(s, u, t):
+        claim_request = u.intent != "none" or bool(u.followup_topics) or self._is_switch(s, u, t)
+        if claim_request or (choice == "none" and bool(u.question) and not u.process_question):
+            if choice != "none":
+                m.email_pref = choice
+                m.remember("email_pref", s.turn, s.phase)
             self._route_request(s, u, t, POST_PROCESS)
             return None
         if choice == "send":

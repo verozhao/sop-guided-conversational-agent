@@ -298,6 +298,20 @@ class PolicyBase:
             if name:
                 facts.setdefault("caller_first_name", name)
         text = fallback.strip()
+        heard = t.trace.memory_captured
+        if s.phase not in {POST_PROCESS, ESCALATED} and not fixed:
+            if "email_pref=send" in heard:
+                facts["email_summary_request"] = (
+                    "The caller asked for an email summary of the call. That is noted. A summary is offered at the "
+                    "end of the call, once their questions are answered, and goes to the email address on file. "
+                    "Nothing is sent now."
+                )
+                cover.append("Tell the caller their request for an email summary is noted and will be taken up at the end of the call.")
+                text = "I've noted that you'd like an email summary, and I'll come back to it at the end of our conversation. " + text
+            elif "email_pref=skip" in heard:
+                facts["email_summary_request"] = "The caller said they do not want an email summary. That is noted and none will be sent."
+                cover.append("Confirm that no email summary will be sent.")
+                text = "I've noted that you don't want an email summary, so I won't send one. " + text
         if t.mixed_scope:
             cover.append("Say briefly that the unrelated part of the message is outside what you can help with here.")
             text = "I can only help with insurance claims, so I'll leave the other part of your message aside. " + text

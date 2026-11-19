@@ -155,6 +155,11 @@ class InsuranceSOP(VerifyIdPhase, ResolveIntentPhase, ProcessCasePhase, PostProc
                     captured.append(f"identity.{name}")
                 if name in m.declined:
                     m.declined.remove(name)
+            if len(u.declined_fields) >= 4:
+                # A blanket "I'm not giving you anything" is a refusal to verify, which the
+                # persuasion ladder handles. It is not a list of fields to work around.
+                u.refuses_verification = True
+                u.declined_fields = []
             for name in u.declined_fields:
                 if name not in m.declined:
                     m.declined.append(name)

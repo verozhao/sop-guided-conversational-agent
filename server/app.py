@@ -5,6 +5,7 @@
 Configuration (environment variables, all optional):
 
     ANTHROPIC_API_KEY   token used when the browser does not send one
+                        (also read from a .env file in the project root)
     SOP_MODEL           default model id            (claude-opus-5-5)
     SOP_EFFORT          low | medium | high | ...   (low)
     SOP_TODAY           YYYY-MM-DD or "real"        (2026-03-05, the fixtures' time frame)
@@ -42,6 +43,34 @@ STATIC_DIR = Path(__file__).parent / "static"
 SESSION_TTL_SECONDS = 3 * 60 * 60
 MAX_SESSIONS = 500
 MODEL_ID_RE = re.compile(r"^claude-[a-z0-9.\-]{2,60}$")
+
+DOTENV_NAMES = {"ANTHROPIC_API_KEY", "SOP_MODEL", "SOP_EFFORT", "SOP_TODAY", "SOP_INSPECTOR"}
+
+
+def load_dotenv(path: Path | None = None) -> list[str]:
+    """Read KEY=VALUE lines from .env in the project root.
+
+    Only the variables this app uses are read, and real environment variables
+    win. Returns the names that were set. Set SOP_SKIP_DOTENV=1 to disable
+    (the test suite does, so tests can never pick up a real token).
+    """
+    if os.environ.get("SOP_SKIP_DOTENV"):
+        return []
+    path = path or Path(__file__).resolve().parent.parent / ".env"
+    if not path.is_file():
+        return []
+    loaded = []
+    for line in path.read_text().splitlines():
+        name, separator, value = line.strip().partition("=")
+        name = name.strip().removeprefix("export ").strip()
+        if not separator or name not in DOTENV_NAMES or name in os.environ:
+            continue
+        os.environ[name] = value.strip().strip("\"'")
+        loaded.append(name)
+    return loaded
+
+
+load_dotenv()
 
 app = FastAPI(title="SOP-guided insurance claims agent", docs_url="/api/docs", redoc_url=None)
 agent = Agent()

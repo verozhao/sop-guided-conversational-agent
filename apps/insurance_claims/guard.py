@@ -29,10 +29,23 @@ _VERIFIED_RE = re.compile(
     r"\byou(?:'re| are|'ve been| have been)\s+(?:now |all |fully |successfully )*(?:verified|authenticated)\b|"
     r"\byour identity (?:is|has been|has now been|is now)\s+(?:verified|confirmed)\b|"
     r"\b(?:verified|confirmed) your identity\b|"
-    r"\bverification (?:is|has been|is now) (?:complete|completed|done|successful)\b|"
-    r"\bidentity (?:verified|confirmed)\b",
+    r"\bverification (?:is|has been|is now) (?:complete|completed|done|successful)\b",
     re.I,
 )
+# Words before such a phrase that make it a condition or a negation, not a claim:
+# "once you're verified", "until your identity is verified", "I haven't verified your identity".
+_NOT_A_CLAIM_RE = re.compile(
+    r"(?:\b(?:once|when|whenever|until|till|after|before|as soon as|if|unless|whether)\b[^.!?;]*|"
+    r"(?:\bnot|n't|\bnever|\bcannot)\s+(?:\w+\s+){0,2})$",
+    re.I,
+)
+
+
+def claims_verified(text: str) -> bool:
+    for match in _VERIFIED_RE.finditer(text):
+        if not _NOT_A_CLAIM_RE.search(text[max(0, match.start() - 80): match.start()]):
+            return True
+    return False
 _SENT_RE = re.compile(
     r"\b(?:i|we)(?:'ve| have)?\s+(?:just\s+|now\s+|already\s+)?(?:sent|emailed)\b|"
     r"\bhas been (?:sent|emailed)\b|\bis on its way\b",
@@ -110,9 +123,13 @@ def check_reply(reply: str, *, session: Session, directive: Directive, data: Cla
             result.fail("ungrounded phone number")
 
     # ---- amounts and dates must be grounded ---------------------------------
+    # An amount is grounded if it appears in the facts, or is one arithmetic step
+    # from two amounts that do ("the gap between the two is $25.00").
     allowed_amounts = _amounts(allowed)
+    derived = {round(abs(a - b), 2) for a in allowed_amounts for b in allowed_amounts}
+    derived |= {round(a + b, 2) for a in allowed_amounts for b in allowed_amounts}
     for amount in _amounts(text):
-        if amount not in allowed_amounts:
+        if amount not in allowed_amounts and amount not in derived:
             result.fail(f"ungrounded amount {amount:.2f}")
 
     allowed_dates = find_dates(allowed)
@@ -141,7 +158,7 @@ def check_reply(reply: str, *, session: Session, directive: Directive, data: Cla
                 result.fail(f"requested document '{document}' that was not provided this turn")
 
     # ---- status and action claims --------------------------------------------
-    if not session.verified and _VERIFIED_RE.search(text):
+    if not session.verified and claims_verified(text):
         result.fail("claims the caller is verified")
     if _SENT_RE.search(text) and not (directive.facts.get("email_sent") or directive.facts.get("consent_request")):
         result.fail("claims something was sent")
