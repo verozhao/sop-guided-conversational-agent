@@ -36,6 +36,7 @@ OOS_OFFER_AT = 3            # consecutive out-of-scope messages before offering 
 OOS_ESCALATE_AT = 4         # ...and before transferring
 DISTRESS_OFFER_AT = 3       # consecutive upset turns before proactively offering a human
 MAX_EMAIL_REASKS = 2        # unclear answers to the email offer before defaulting to "skip"
+MAX_NAME_MISSES = 3         # names that match no policy before they count as failed attempts
 
 # ---- rules attached to every directive -------------------------------------------
 
@@ -78,6 +79,15 @@ PROCESS_FACTS = {
     "alternatives": "The caller can pick different details, or ask for a human representative at any time.",
     "after_verification": "Once verified, the assistant can pull up the claim and answer questions straight away.",
     "who_you_are": "An automated virtual assistant for claims support.",
+    "if_a_detail_does_not_match": (
+        "The caller can correct it or give a different detail. After three attempts with details that do not "
+        "match, the conversation goes to a human representative."
+    ),
+    "other_documents": (
+        "Only the five listed details can be used. A postal address, a driver's licence, a passport or a "
+        "member ID cannot."
+    ),
+    "how_details_are_used": "The details are used only to confirm identity against the policy record.",
 }
 CONSENT_FACTS = {
     "why_consent_is_required": (
@@ -184,6 +194,7 @@ class TurnCtx:
     status_mismatch: str = ""        # the caller described the claim with a status it does not have
     exclude_case: str = ""           # "the other claim": anything but this one
     uncovered: bool = False          # the question maps to no workflow path
+    reexplain: bool = False          # the caller is lost: go over the claim again
     declined_human: bool = False     # the caller just said no to an offered human
     mixed_scope: bool = False
     tone: str = ""
@@ -361,6 +372,30 @@ class PolicyBase:
                 "The claim belongs to the policyholder, so I can only share details with someone else once "
                 "they've approved it. It protects their private information."
             )
+        asks_why = re.search(r"\bwhy\b|what\s+for\b|safe|secure|trust|scam|legit|have\s+to|necessary|required", low)
+        if not s.verified and not asks_why:
+            # Clarifications about the step itself get their own answer, not the reason for it.
+            if re.search(r"\bare\s+you\s+(?:still\s+)?(?:there|listening)\b", low):
+                return "Yes, I'm still here."
+            if re.search(r"\b(?:minute|moment|sec|second)\b|\b(?:hold|hang)\s+on\b|bear\s+with|let\s+me\s+(?:check|find|look|grab|get)", low):
+                return "No rush, take your time."
+            if re.search(r"wrong|mistake|incorrect|(?:doesn't|don't|not)\s+match|attempts?|tries|locked", low):
+                return (
+                    "If a detail doesn't match, you can correct it or give a different one. After three attempts "
+                    "that don't match, I pass the conversation to a human representative."
+                )
+            if re.search(r"\b(?:store[ds]?|keep|kept|save[ds]?|share[ds]?|sell|record(?:ed|ing)?|privacy|data)\b", low):
+                return (
+                    "The details are only used to confirm identity against the policy record. I never need a "
+                    "full SSN, only the last four digits."
+                )
+            if re.search(
+                r"address|licen[sc]e|passport|zip|maiden|middle\s+name|member\s+id|instead|(?:other|another|different)\s+way|"
+                r"something\s+else|any\s+other|what\s+else|can\s+i\s+use",
+                low,
+            ):
+                return "I can only verify with the details on this list, so other documents or details can't be used here."
+            return "I need three details to complete verification, and you choose which ones."
         return (
             "I ask because claim files hold private health and financial information, and verifying makes sure "
             "only you, or someone you've authorized, can get into yours. I never need a full SSN, only the last "

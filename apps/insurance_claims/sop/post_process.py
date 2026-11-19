@@ -116,6 +116,18 @@ class PostProcessPhase(PolicyBase):
                 must_not=["Do not send or claim to have sent anything yet."],
             )
 
+        if u.more and u.email_summary_choice == "none":
+            # "wait, I have another question": back to the claim, the offer comes again later.
+            back = PROCESS_CASE if s.case_id else RESOLVE_INTENT
+            self.graph.move(s, back, "the caller has another question", t.trace)
+            s.pending = "anything_else" if s.case_id else "open"
+            return self._directive(
+                s, t, "ASK_WHAT_ELSE",
+                goal="The caller has another question but has not asked it yet. Invite it.",
+                fallback="Of course. What else would you like to know?",
+                facts={"claim_in_focus": s.case_id},
+            )
+
         choice = u.email_summary_choice
         if choice == "none" and s.pending == "email_offer" and u.affirmation != "none":
             choice = "send" if u.affirmation == "yes" else "skip"
@@ -205,6 +217,13 @@ class PostProcessPhase(PolicyBase):
         if s.verified and self._has_request(s, u, t):
             self._route_request(s, u, t, CLOSED)
             return None
+        if u.more and s.verified:
+            return self._directive(
+                s, t, "CLOSED_MORE",
+                goal="The conversation was wrapped up and the caller has another question. Invite it.",
+                fallback="Of course. What would you like to know?",
+                fixed=True,
+            )
         if u.emotion != "neutral" or u.process_question:
             s.pending = "human_offer"
             return self._directive(

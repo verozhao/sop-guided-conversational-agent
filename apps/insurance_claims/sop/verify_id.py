@@ -24,6 +24,7 @@ from ..verification import PII_FIELDS, REQUIRED_MATCHES, verify_identity
 from .common import (
     CONSENT_FACTS,
     MAX_FAILED_ATTEMPTS,
+    MAX_NAME_MISSES,
     MAX_PERSUASION,
     PROCESS_FACTS,
     REP_GATE_RULES,
@@ -56,6 +57,13 @@ class VerifyIdPhase(PolicyBase):
     def _verify(self, s: Session, u: Understanding, t: TurnCtx) -> Directive | None:
         m = s.memory
         result = verify_identity(self.data, m.identity)
+        if "full_name" in result.conflicts and "full_name" in u.guessed and s.name_misses < MAX_NAME_MISSES:
+            # A short reply the offline rules took for a name. It matches nobody, so it was
+            # probably not a name: drop it without comment. The allowance is limited.
+            s.name_misses += 1
+            m.identity.pop("full_name", None)
+            t.new_identity = [f for f in t.new_identity if f != "full_name"]
+            result = verify_identity(self.data, m.identity)
         s.verification = result.summary()
         s.identity_ok = result.verified
         s.party_id = result.record.party_id if result.verified and result.record else None
@@ -118,9 +126,10 @@ class VerifyIdPhase(PolicyBase):
             for name in result.conflicts:
                 m.identity.pop(name, None)
             others = [f for f in PII_FIELDS if f != "full_name" and f in m.identity]
-            if result.record is None and result.conflicts == ["full_name"] and not others:
+            if result.record is None and result.conflicts == ["full_name"] and not others and s.name_misses < MAX_NAME_MISSES:
                 # Names are not secrets, and a short reply can be misread as one. Nothing to
-                # count: ask for the name as it appears on the policy, or for other details.
+                # count the first few times: ask for the name as it appears on the policy.
+                s.name_misses += 1
                 facts["verification"]["name_not_found"] = True
                 return self._directive(
                     s, t, "VERIFY_NAME_NOT_FOUND",

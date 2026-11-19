@@ -10,6 +10,7 @@ to repeat them.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sop_harness.core import Directive
@@ -23,6 +24,13 @@ from .common import (
     claim_phrase,
     describe_hints,
     filter_claims,
+)
+
+# The caller says outright that what they need is not among the claims shown.
+NOT_LISTED = re.compile(
+    r"\bnone\s+of\b|\bneither\b|\bnot\s+(?:on|in)\s+(?:the|your|that)\s+list\b|\bnot\s+(?:one|any)\s+of\b|"
+    r"\bnew\s+(?:claim|one)\b|\b(?:file|open|start|submit)\s+a\s+(?:new\s+)?claim\b|\b(?:another|different)\s+policy\b",
+    re.I,
 )
 
 
@@ -59,7 +67,7 @@ class ResolveIntentPhase(PolicyBase):
         picked = bool(u.selected_case_id or t.turn_hints)
         if not t.entered and s.pending == "choose_case" and not picked:
             s.unresolved_asks += 1
-            if u.affirmation == "no" or s.unresolved_asks >= 2:
+            if u.affirmation == "no" or s.unresolved_asks >= 2 or NOT_LISTED.search(t.text):
                 s.unresolved_asks = 0
                 s.pending = "human_offer"
                 return self._directive(

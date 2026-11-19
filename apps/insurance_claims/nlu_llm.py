@@ -105,6 +105,9 @@ email_summary_choice
 done
   true when the caller signals they need nothing more ("that's all", "no thanks" in reply to "anything else?", goodbye).
 
+more
+  true when the caller says they have something else to ask or are not finished, without asking it in this message ("wait, one more thing", "I have another question", "don't hang up"). false when the message already contains the question.
+
 notes
   Facts worth remembering later that no field above captures, each as one short sentence (for example "Caller says the lab closed and cannot reissue the report"). Do not restate what the other fields already say and do not describe the message. Usually []."""
 

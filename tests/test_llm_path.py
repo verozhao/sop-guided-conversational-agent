@@ -41,6 +41,7 @@ def reading(**overrides) -> dict:
         "affirmation": "none",
         "email_summary_choice": "none",
         "done": False,
+        "more": False,
         "notes": [],
     }
     identity = overrides.pop("identity", {})

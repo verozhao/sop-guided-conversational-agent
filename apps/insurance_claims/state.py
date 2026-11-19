@@ -60,6 +60,7 @@ class Session:
     party_id: str | None = None
     verification: dict[str, Any] = field(default_factory=dict)
     failed_attempts: int = 0
+    name_misses: int = 0
     refusal_count: int = 0
     rep_denials: int = 0
     consent: dict[str, Any] = field(

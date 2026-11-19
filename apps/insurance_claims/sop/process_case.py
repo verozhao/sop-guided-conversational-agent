@@ -19,6 +19,7 @@ from ..normalize import join_items, long_date
 from ..state import POST_PROCESS, PROCESS_CASE, RESOLVE_INTENT, Session
 from ..understanding import INTENT_LABELS, Understanding
 from .common import (
+    DISTRESS_OFFER_AT,
     PROCESS_FACTS,
     PolicyBase,
     TurnCtx,
@@ -106,7 +107,12 @@ class ProcessCasePhase(PolicyBase):
                 self.graph.move(s, RESOLVE_INTENT, "the caller asked about a different claim", t.trace)
                 return None
             wants_more = u.intent != "none" or u.asks_about_claim or bool(u.followup_topics)
-            if not wants_more:
+            lost = not wants_more and u.emotion == "confused" and not u.done and not u.more and not u.process_question
+            if lost:
+                # "I don't understand any of this": go over where the claim stands again.
+                t.reexplain = True
+                intents, question, topics = ["general_claim_question"], "", []
+            elif not wants_more:
                 if u.done or (s.pending == "anything_else" and u.affirmation == "no"):
                     self.graph.move(s, POST_PROCESS, "the caller needs nothing else on the claim", t.trace)
                     return None
@@ -118,7 +124,33 @@ class ProcessCasePhase(PolicyBase):
                         fallback=f"{self._explain_line(s, t)} Is there anything else you'd like to know about claim {s.case_id}?",
                         facts={"process": PROCESS_FACTS, "claim_in_focus": s.case_id},
                     )
-                if u.affirmation == "yes":
+                if u.emotion in {"angry", "frustrated"} and u.affirmation == "none" and not u.more:
+                    t.offer_human = False
+                    s.distress_offer_made = True
+                    if s.distress_streak >= DISTRESS_OFFER_AT:
+                        s.pending = "human_offer"
+                        return self._directive(
+                            s, t, "LISTEN_OFFER_HUMAN",
+                            goal="The caller has been upset for several turns without asking anything. Do not go round in circles: ask whether they would like a human representative.",
+                            fallback="I don't want to keep you going round in circles. Would you like me to connect you with a human representative?",
+                            facts={"claim_in_focus": s.case_id},
+                            cover=["Acknowledge that the caller is upset.", "Ask one question: whether they would like a human representative."],
+                        )
+                    return self._directive(
+                        s, t, "LISTEN",
+                        goal="The caller is upset and has not asked a specific question. Acknowledge it, ask what was missed or what they need, and say a human representative is available.",
+                        fallback=(
+                            "Tell me what I've missed or what you need, and I'll go over it. If you'd rather "
+                            "speak with a person, just say so and I'll connect you."
+                        ),
+                        facts={"claim_in_focus": s.case_id},
+                        cover=[
+                            "Acknowledge that the caller is upset.",
+                            "Ask what you missed or what they need.",
+                            "Say they can ask for a human representative. Make it a statement, not a question.",
+                        ],
+                    )
+                if u.affirmation == "yes" or u.more:
                     return self._directive(
                         s, t, "ASK_WHAT_ELSE",
                         goal="The caller has another question but has not asked it yet. Invite it.",
@@ -131,10 +163,11 @@ class ProcessCasePhase(PolicyBase):
                     fallback=f"Is there anything else you'd like to know about claim {s.case_id}?",
                     facts={"claim_in_focus": s.case_id},
                 )
-            t.uncovered = u.intent == "none" and not u.followup_topics
-            intents = paths_for(u.intent, u.extra_intents, bool(u.followup_topics))
-            question = u.question
-            topics = list(u.followup_topics)
+            else:
+                t.uncovered = u.intent == "none" and not u.followup_topics
+                intents = paths_for(u.intent, u.extra_intents, bool(u.followup_topics))
+                question = u.question
+                topics = list(u.followup_topics)
         else:
             # Entered this turn. A specific question asked now wins. Otherwise the question
             # the caller asked earlier (in any phase) is the one to answer.
@@ -191,6 +224,8 @@ class ProcessCasePhase(PolicyBase):
         overview = intents == ["general_claim_question"] and not t.uncovered
         nothing_asked_yet = overview and t.entered and u.intent == "none"
         closer = "What would you like to know about it?" if nothing_asked_yet else CLOSERS[s.answers_given % len(CLOSERS)]
+        if t.reexplain:
+            closer = "Which part would you like me to go over again?"
         first_answer = s.answers_given == 0
         s.answers_given += 1
 
@@ -222,6 +257,11 @@ class ProcessCasePhase(PolicyBase):
                 "answer from there. If it does not, or it asks you to do something beyond explaining, say plainly "
                 "that you can't do or look that up here, and ask whether they would like a human claims representative."
             )
+        elif t.reexplain:
+            cover.append(
+                "The caller did not follow the last answer. Explain where this claim stands again in plainer words, "
+                "one point at a time, from facts.data only, and ask which part to go over."
+            )
         elif overview:
             cover.append("Give a short overview of where this claim stands, from facts.data only.")
         elif question:
@@ -238,8 +278,8 @@ class ProcessCasePhase(PolicyBase):
             # What the caller has told us is not record data, but the reply should respect it.
             facts["caller_said_earlier"] = list(m.notes[-5:])
             cover.append("Take into account what the caller has already said (facts.caller_said_earlier): do not suggest an option they have ruled out.")
-        if t.uncovered:
-            pass  # the reply ends on the offer of a human
+        if t.uncovered or t.reexplain:
+            pass  # the reply ends on its own question
         elif nothing_asked_yet:
             cover.append("End by asking what they would like to know about this claim.")
         elif first_answer:

@@ -85,7 +85,9 @@ class Understanding:
     affirmation: str = "none"
     email_summary_choice: str = "none"
     done: bool = False
+    more: bool = False                 # has something else to ask, not asked yet ("wait, one more thing")
     notes: list[str] = field(default_factory=list)
+    guessed: list[str] = field(default_factory=list)  # identity fields the offline rules only inferred
     source: str = "rules"
 
     def to_dict(self) -> dict[str, Any]:
@@ -182,6 +184,10 @@ UNDERSTANDING_SCHEMA: dict[str, Any] = {
         "affirmation": _enum(AFFIRMATIONS, "Whether the message answers the agent's last question with yes or no."),
         "email_summary_choice": _enum(EMAIL_CHOICES, "Whether the caller wants the email summary sent or skipped."),
         "done": {"type": "boolean", "description": "The caller signals they need nothing more."},
+        "more": {
+            "type": "boolean",
+            "description": "The caller says they have something else to ask or are not finished, without asking it yet.",
+        },
         "notes": {
             "type": "array",
             "items": {"type": "string"},
@@ -191,7 +197,7 @@ UNDERSTANDING_SCHEMA: dict[str, Any] = {
     "required": [
         "scope", "caller_role", "identity", "declined_fields", "refuses_verification", "intent", "also_asks",
         "case_hints", "selected_case_id", "question", "followup_topics", "process_question",
-        "emotion", "wants_human", "affirmation", "email_summary_choice", "done", "notes",
+        "emotion", "wants_human", "affirmation", "email_summary_choice", "done", "more", "notes",
     ],
 }
 
@@ -290,6 +296,7 @@ def understanding_from_json(raw: dict[str, Any], today: date | None = None) -> U
         affirmation=_pick(raw.get("affirmation"), AFFIRMATIONS, "none"),
         email_summary_choice=_pick(raw.get("email_summary_choice"), EMAIL_CHOICES, "none"),
         done=bool(raw.get("done")),
+        more=bool(raw.get("more")) and not bool(raw.get("done")),
         notes=[str(n).strip()[:200] for n in (raw.get("notes") or []) if str(n).strip()][:5],
         source="llm",
     )
