@@ -1,0 +1,12 @@
+services:
+  agent:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Optional. Leave unset to paste a token into the UI, or to use the offline engine.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      SOP_MODEL: ${SOP_MODEL:-claude-opus-5-5}
+      SOP_EFFORT: ${SOP_EFFORT:-low}
+      SOP_TODAY: ${SOP_TODAY:-}
+      SOP_INSPECTOR: ${SOP_INSPECTOR:-on}
