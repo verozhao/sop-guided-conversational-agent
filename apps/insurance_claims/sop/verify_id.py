@@ -26,6 +26,7 @@ from .common import (
     MAX_FAILED_ATTEMPTS,
     MAX_PERSUASION,
     PROCESS_FACTS,
+    REP_GATE_RULES,
     SHORT_LABELS,
     PolicyBase,
     TurnCtx,
@@ -97,6 +98,18 @@ class VerifyIdPhase(PolicyBase):
                     " Since you're calling on someone else's behalf, I'll verify the policyholder's details "
                     "first, and then I'll need their consent before I can share anything about the claim."
                 )
+        rep_cover = (
+            ["Say that once the policyholder's details are confirmed, the policyholder will also be asked to approve before anything about the claim can be shared."]
+            if rep_note
+            else []
+        )
+        rep_rules: list[str] = []
+        if is_rep:
+            # A third party is not told which of the details they supplied were right.
+            facts["verification"]["details_received_so_far"] = facts["verification"].pop("details_confirmed_so_far")
+            rep_rules = [
+                "The details asked for are the policyholder's. Do not say whether the details given so far match the records. Say only how many more are needed."
+            ]
         s.pending = "identity"
 
         # 1. Something the caller gave does not match. Count the attempt and
@@ -104,6 +117,24 @@ class VerifyIdPhase(PolicyBase):
         if result.conflicts:
             for name in result.conflicts:
                 m.identity.pop(name, None)
+            others = [f for f in PII_FIELDS if f != "full_name" and f in m.identity]
+            if result.record is None and result.conflicts == ["full_name"] and not others:
+                # Names are not secrets, and a short reply can be misread as one. Nothing to
+                # count: ask for the name as it appears on the policy, or for other details.
+                facts["verification"]["name_not_found"] = True
+                return self._directive(
+                    s, t, "VERIFY_NAME_NOT_FOUND",
+                    goal="The name given matches no policy. Say so without guessing why, and ask for the full name as it appears on the policy or for other details.",
+                    fallback=(
+                        f"I couldn't find a policy under that name. Could you give me the full name as it "
+                        f"appears on the policy, or any three of these: {self._labels(s, list(PII_FIELDS), 'or')}?"
+                    ),
+                    facts=facts,
+                    cover=[
+                        "Say you could not find a policy under that name.",
+                        "Ask for the full name as it appears on the policy, or for other accepted details.",
+                    ],
+                )
             s.failed_attempts += 1
             left = MAX_FAILED_ATTEMPTS - s.failed_attempts
             if left <= 0:
@@ -149,7 +180,6 @@ class VerifyIdPhase(PolicyBase):
                     s, t, "caller declined the identity details needed for verification",
                     lead="I understand, and I won't keep pressing you.",
                 )
-            s.human_offer_open = True
             shortfall = REQUIRED_MATCHES - len(matched) - len(remaining)
             how_many = "one" if shortfall == 1 else f"at least {['', 'one', 'two', 'three'][min(shortfall, 3)]}"
             facts["verification"]["declined_details_needed_after_all"] = shortfall
@@ -192,7 +222,6 @@ class VerifyIdPhase(PolicyBase):
                     "Offer the accepted ways to verify and ask for what is still needed.",
                 ]
             else:
-                s.human_offer_open = True
                 text = (
                     f"I do want to get you an answer today. I'm not able to skip this step, because it's what "
                     f"stops anyone else from getting into your claim. You can use whichever details you're most "
@@ -201,10 +230,16 @@ class VerifyIdPhase(PolicyBase):
                 )
                 cover = [
                     "Acknowledge the caller's feelings first.",
-                    "Say plainly, without lecturing, that this step cannot be skipped and what it protects.",
+                    "Say plainly, without lecturing, that this step cannot be skipped and what it protects. Use a different angle from the last explanation (facts.process has several).",
                     "Let them choose which accepted details to use.",
                     "Offer a human representative as the alternative and ask which they prefer.",
                 ]
+            if is_rep:
+                text += " The policyholder can also call us directly."
+                cover.append(
+                    "Explain that a representative can be given claim details only when listed on the policy and "
+                    "approved by the policyholder, and that the policyholder can also call directly."
+                )
             facts["verification"]["times_caller_has_pushed_back"] = s.refusal_count
             return self._directive(
                 s, t, f"VERIFY_PERSUADE_{s.refusal_count}",
@@ -212,7 +247,7 @@ class VerifyIdPhase(PolicyBase):
                 fallback=text,
                 facts=facts,
                 cover=cover,
-                must_not=["Do not answer the caller's claim question yet, not even in general terms."],
+                must_not=["Do not answer the caller's claim question yet, not even in general terms."] + rep_rules,
             )
 
         # 4. A question about the process itself.
@@ -234,10 +269,14 @@ class VerifyIdPhase(PolicyBase):
             if u.declined_fields:
                 opener = f"That's fine, you don't need to give me {self._labels(s, u.declined_fields, 'or')}."
             if matched:
-                opener += f" I've confirmed {self._labels(s, matched)}."
+                opener += f" I've {'noted' if is_rep else 'confirmed'} {self._labels(s, matched)}."
             if result.incomplete:
                 opener += " For the name to count I'll need the full first and last name."
             cover = ["Acknowledge what the caller just gave or declined.", "Ask for what is still needed, offering the remaining choices."]
+            cover += rep_cover
+            if u.process_question:
+                opener = f"{self._explain_line(s, t)} {opener}"
+                cover.insert(0, "Answer the caller's question about the process first, from facts.process (and facts.representative if relevant).")
             if u.has_request:
                 cover.insert(1, "Tell the caller you will get to their request as soon as verification is done.")
             if u.emotion in {"angry", "frustrated"}:
@@ -252,9 +291,21 @@ class VerifyIdPhase(PolicyBase):
                 fallback=f"{opener}{rep_note} {self._ask_identity(s, matched, remaining)}",
                 facts=facts,
                 cover=cover,
+                must_not=rep_rules,
             )
 
-        # 6. Nothing usable yet: ask (again), acknowledging any request we saved.
+        # 6. The caller is leaving. Let them go without another request for details.
+        if u.done and not u.has_request:
+            return self._directive(
+                s, t, "VERIFY_GOODBYE",
+                goal="The caller is ending the conversation before verifying. Let them go politely. Nothing was looked up and nothing can be said about any claim.",
+                fallback="No problem. Whenever you'd like to pick this up again, I'll just need to verify your identity first. Take care.",
+                facts=facts,
+                cover=["Say goodbye politely.", "Say they can come back any time and that verification is the first step."],
+                must_not=["Do not ask for identity details again."],
+            )
+
+        # 7. Nothing usable yet: ask (again), acknowledging any request we saved.
         ask = self._ask_identity(s, matched, remaining)
         if u.has_request:
             text = f"I'd be glad to help with that. Before I can look at any claim, I need to verify {who}.{rep_note} {ask}"
@@ -270,26 +321,43 @@ class VerifyIdPhase(PolicyBase):
             goal="Identity is not verified. Keep the conversation natural and ask for the details needed to verify.",
             fallback=text,
             facts=facts,
-            cover=cover,
+            cover=cover + rep_cover,
+            must_not=rep_rules,
         )
 
     def _rep_gate(self, s: Session, u: Understanding, t: TurnCtx) -> Directive | None:
-        """Policyholder details match. A representative also needs listing and consent."""
+        """The policyholder's details check out. A representative also needs listing and consent.
+
+        Until consent is approved the reply works under ``REP_GATE_RULES``: it may say the
+        details check out and that a consent request went out, and nothing else that is on file.
+        """
         m = s.memory
-        holder = (m.identity.get("full_name") or "the policyholder").split()[0]
+        holder = self._holder(s)
+        Holder = holder[0].upper() + holder[1:]
         facts: dict[str, Any] = {
             "representative": CONSENT_FACTS,
-            "policyholder_details_match": True,
-            "policyholder_first_name_as_given_by_caller": holder,
+            "how_to_refer_to_the_policyholder": holder,
         }
+        if t.declined_human or (u.done and s.consent.get("status") != "pending"):
+            # They were offered a human and said no. Nothing more can be done here.
+            s.pending = "none"
+            return self._directive(
+                s, t, "REP_GOODBYE",
+                goal="The caller declined a human representative and nothing can be shared.",
+                fallback=f"No problem. {Holder} is welcome to contact us directly at any time. Take care.",
+                facts=facts,
+                rules=REP_GATE_RULES,
+                fixed=True,
+            )
         if not m.representative_name:
             s.pending = "rep_name"
             return self._directive(
                 s, t, "ASK_REP_NAME",
-                goal="The policyholder's details match. Ask the caller for their own full name so it can be checked against the authorized representatives.",
-                fallback="Thank you, those details match. Since you're calling on someone else's behalf, may I have your own full name?",
+                goal="The caller is calling for someone else and has not given their own name. Ask for it.",
+                fallback="Thank you. Since you're calling on someone else's behalf, may I have your own full name as well?",
                 facts=facts,
-                cover=["Say the details match.", "Ask for the caller's own full name."],
+                cover=["Ask for the caller's own full name."],
+                rules=REP_GATE_RULES,
             )
 
         rep_first = m.representative_name.split()[0]
@@ -301,58 +369,66 @@ class VerifyIdPhase(PolicyBase):
                     lead="I understand this is frustrating.",
                 )
             s.pending = "human_offer"
-            facts["caller_is_listed_as_authorized_representative"] = False
-            facts.pop("policyholder_details_match", None)
+            facts["caller_is_an_authorized_representative"] = False
             return self._directive(
                 s, t, "REP_NOT_AUTHORIZED",
-                goal="The caller is not listed as an authorized representative on this policy, so nothing about the claim can be shared. Explain kindly and offer the ways forward.",
+                goal="The caller is not an authorized representative for this policyholder, so nothing can be shared. Explain kindly and offer the ways forward.",
                 fallback=(
                     f"Thank you, {rep_first}. I don't see you listed as an authorized representative, so I'm "
                     f"not able to discuss this policy or any claim with you. "
-                    f"{holder} can call us directly, or I can connect you with a human representative who can "
+                    f"{Holder} can call us directly, or I can connect you with a human representative who can "
                     f"explain how to be added. Would you like me to do that?"
                 ),
                 facts=facts,
                 cover=[
-                    "Say you cannot discuss the claim because they are not listed as an authorized representative.",
+                    "Say you cannot discuss anything because they are not listed as an authorized representative.",
                     "Offer the alternatives: the policyholder calls directly, or a human representative.",
                 ],
+                must_not=["Do not say whether the details they gave matched."],
+                rules=REP_GATE_RULES,
             )
 
-        facts["caller_is_listed_as_authorized_representative"] = True
         status = s.consent.get("status")
         first_request = status is None
         if first_request:
             status = self.tools.call("request_consent", s, t.trace)["status"]
         elif status == "pending":
             status = self.tools.call("check_consent_status", s, t.trace)["status"]
-        facts["consent_request"] = {"status": status, "sent_to": "the phone number on file for the policyholder"}
+        facts["consent_request"] = {"status": status, "sent_to": "the policyholder"}
 
         if status == "approved":
             self._grant(s, t, "policyholder details matched and the policyholder approved the representative")
             return None
 
+        alternatives = f"If {holder} can't approve it right now, they can also call us directly, or you can ask me for a human representative."
         if status == "pending":
             s.pending = "consent"
             if first_request:
                 text = (
-                    f"Thank you, {rep_first}. Those details match, and I see you're listed as an authorized "
-                    f"representative. Because the claim belongs to {holder}, I need their approval before I can "
-                    f"share details, so I've just sent a consent request to the phone number on file for them. "
-                    f"Could you let me know once they've approved it?"
+                    f"Thank you, {rep_first}. Those details check out. Because the claim belongs to {holder}, I "
+                    f"need their approval before I can share anything about it, which protects their private "
+                    f"information. I've just sent {holder} a consent request. Could you let me know once they've "
+                    f"approved it? {alternatives}"
                 )
+                if u.process_question:
+                    text = f"{self._explain_line(s, t)} {text}"
                 cover = [
-                    "Confirm the details match and that the caller is a listed representative.",
-                    "Explain that the policyholder's approval is needed and why.",
-                    "Say a consent request was sent to the phone number on file, and ask the caller to say when it is approved.",
+                    "Say the details the caller gave check out.",
+                    "Explain that the policyholder's approval is needed before anything about the claim can be shared, and why.",
+                    "Say a consent request was sent to the policyholder and ask the caller to say when it is approved.",
+                    "Mention the alternatives if the policyholder cannot approve now: they can call directly, or a human representative can help.",
                 ]
             else:
                 explain = f"{self._explain_line(s, t)} " if u.process_question else ""
                 text = (
                     f"{explain}I've checked again and the approval hasn't come through yet. The request went to "
-                    f"the phone number on file for {holder}. Let me know when it's done and I'll check right away."
+                    f"{holder} directly. Let me know when it's done and I'll check right away. {alternatives}"
                 )
-                cover = ["Say the approval has not arrived yet.", "Ask the caller to say when it has been approved."]
+                cover = [
+                    "Say the approval has not arrived yet.",
+                    "Ask the caller to say when it has been approved.",
+                    "Mention the alternatives: the policyholder can call directly, or a human representative can help.",
+                ]
                 if u.process_question:
                     cover.insert(0, "Answer the caller's question about consent from facts.representative.")
             return self._directive(
@@ -361,10 +437,16 @@ class VerifyIdPhase(PolicyBase):
                 fallback=text,
                 facts=facts,
                 cover=cover,
+                rules=REP_GATE_RULES,
             )
 
         # expired or denied
         s.consent["timeouts"] = s.consent.get("timeouts", 0) + 1
+        if s.consent["timeouts"] >= 2:
+            return self._escalate(
+                s, t, "the policyholder's consent was not received",
+                lead="I'm not able to request consent again from here, so a person will take this forward.",
+            )
         s.pending = "human_offer"
         happened = "was declined" if status == "denied" else "has expired without an answer"
         return self._directive(
@@ -372,7 +454,7 @@ class VerifyIdPhase(PolicyBase):
             goal="The policyholder's consent was not obtained, so nothing about the claim can be shared. Explain and offer the ways forward.",
             fallback=(
                 f"I'm sorry, the consent request {happened}, so I'm not able to share claim details. "
-                f"{holder} can call us directly, or I can connect you with a human representative to work out "
+                f"{Holder} can call us directly, or I can connect you with a human representative to work out "
                 f"another way to confirm consent. Would you like me to transfer you?"
             ),
             facts=facts,
@@ -380,4 +462,5 @@ class VerifyIdPhase(PolicyBase):
                 f"Say the consent request {happened} and that claim details cannot be shared without it.",
                 "Offer the alternatives: the policyholder calls directly, or a human representative.",
             ],
+            rules=REP_GATE_RULES,
         )

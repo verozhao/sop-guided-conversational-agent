@@ -25,6 +25,7 @@ from ..state import (
     VERIFY_ID,
     Session,
 )
+from ..understanding import INTENT_LABELS, Understanding
 from ..verification import REQUIRED_MATCHES
 
 # ---- SOP limits --------------------------------------------------------------
@@ -51,6 +52,13 @@ POST_VERIFICATION_RULES = [
 
 # ---- grounded facts about the process itself (safe to say before verification) ---
 
+# Between "the policyholder's details check out" and "the policyholder has consented".
+REP_GATE_RULES = [
+    "Do not state, confirm, deny or hint at anything about a claim: not its existence, status, reason, amounts, documents or dates.",
+    "Do not say the caller is verified or may now hear claim details.",
+    "You may say that the details given check out and that a consent request went to the policyholder. Reveal nothing else that is on file.",
+]
+
 PROCESS_FACTS = {
     "why_verification_is_required": (
         "Claim files hold private health and financial information. Verifying identity makes sure nobody "
@@ -62,6 +70,11 @@ PROCESS_FACTS = {
         "last four digits of the SSN or national ID. The caller chooses which."
     ),
     "what_is_never_needed": "A full SSN, passwords or payment card numbers are never needed.",
+    "what_it_prevents": (
+        "Without this check, anyone who knows a policyholder's name could contact support and be told "
+        "private medical and financial details."
+    ),
+    "how_long_it_takes": "Two or three short answers.",
     "alternatives": "The caller can pick different details, or ask for a human representative at any time.",
     "after_verification": "Once verified, the assistant can pull up the claim and answer questions straight away.",
     "who_you_are": "An automated virtual assistant for claims support.",
@@ -120,8 +133,8 @@ EMPATHY = {
         "I understand this is stressful, and we'll take it step by step.",
     ],
     "confused": [
-        "No problem at all, let me explain that more clearly.",
-        "That's a fair question, let me put it more simply.",
+        "No problem at all, let's take it one piece at a time.",
+        "That's a fair thing to ask.",
     ],
     "sad": [
         "I'm really sorry you're going through this.",
@@ -171,6 +184,7 @@ class TurnCtx:
     status_mismatch: str = ""        # the caller described the claim with a status it does not have
     exclude_case: str = ""           # "the other claim": anything but this one
     uncovered: bool = False          # the question maps to no workflow path
+    declined_human: bool = False     # the caller just said no to an offered human
     mixed_scope: bool = False
     tone: str = ""
     empathy: str = ""
@@ -201,6 +215,8 @@ def describe_hints(hints: dict[str, Any]) -> str:
     if hints.get("claim_type") and hints["claim_type"] != "other":
         parts.append(str(hints["claim_type"]))
     text = " ".join(parts + ["claim"])
+    if hints.get("claim_type") == "other":
+        text += " of that kind"
     month, year = hints.get("month"), hints.get("year")
     if month and year:
         text += f" from {MONTH_NAMES[month - 1]} {year}"
@@ -288,10 +304,12 @@ class PolicyBase:
         cover: list[str] | None = None,
         must_not: list[str] | None = None,
         fixed: bool = False,
+        rules: list[str] | None = None,
     ) -> Directive:
         facts = dict(facts or {})
         cover = list(cover or [])
-        rules = list(POST_VERIFICATION_RULES if s.verified else PRE_VERIFICATION_RULES) + list(must_not or [])
+        base_rules = rules if rules is not None else (POST_VERIFICATION_RULES if s.verified else PRE_VERIFICATION_RULES)
+        rules = list(base_rules) + list(must_not or [])
         if s.verified:
             facts.setdefault("today", self._today())
             name = self._first_name(s)
@@ -312,15 +330,18 @@ class PolicyBase:
                 facts["email_summary_request"] = "The caller said they do not want an email summary. That is noted and none will be sent."
                 cover.append("Confirm that no email summary will be sent.")
                 text = "I've noted that you don't want an email summary, so I won't send one. " + text
-        if t.mixed_scope:
+        if t.mixed_scope and s.phase != ESCALATED and s.mixed_note_turn != s.turn - 1:
+            s.mixed_note_turn = s.turn
             cover.append("Say briefly that the unrelated part of the message is outside what you can help with here.")
             text = "I can only help with insurance claims, so I'll leave the other part of your message aside. " + text
         if t.empathy:
             text = f"{t.empathy} {text}"
-        if t.offer_human:
-            cover.append("Because the caller has been upset for several turns, also offer a human representative.")
-            text += " If you'd prefer, I can also connect you with a human representative."
-            s.human_offer_open = True
+        if t.offer_human and s.phase in {RESOLVE_INTENT, PROCESS_CASE} and not fixed:
+            cover.append(
+                "The caller has been upset for several turns. Add one sentence saying they can ask for a human "
+                "representative at any point. Make it a statement, not a question."
+            )
+            text += " If you'd rather speak with a person at any point, just say so and I'll connect you."
             s.distress_offer_made = True
         return Directive(
             act=act, goal=goal, fallback=text, facts=facts, must_cover=cover, must_not=rules, tone=t.tone, fixed=fixed
@@ -346,12 +367,18 @@ class PolicyBase:
             "four digits, and you choose which details to give."
         )
 
+    def _holder(self, s: Session) -> str:
+        """How to refer to the policyholder when talking to a representative."""
+        name = s.memory.identity.get("full_name") or ""
+        return name.split()[0] if name else "the policyholder"
+
     def _verified_intro(self, s: Session, t: TurnCtx) -> str:
         if not t.just_verified:
             return ""
         name = self._first_name(s)
         if self._is_rep(s):
-            holder = (s.memory.identity.get("full_name") or "the policyholder").split()[0]
+            holder = self._holder(s)
+            holder = holder[0].upper() + holder[1:]
             return f"Thank you, {name}. {holder}'s approval has come through, so I can go over the claim with you. "
         return f"Thank you, {name}. You're verified. " if name else "Thank you. You're verified. "
 
@@ -367,13 +394,31 @@ class PolicyBase:
         self.graph.move(s, ESCALATED, reason, t.trace)
         s.pending = "none"
         t.offer_human = False
-        text = (
-            f"{lead} I'm connecting you with a human representative now. I've passed along what you've told "
-            f"me so you won't have to repeat yourself, and your reference is {out['ticket_id']}."
-        )
+        t.mixed_scope = False
+        ticket = s.handoff or {}
+        passed_along = {
+            "identity_details_given": ticket.get("identity_details_provided") or [],
+            "what_the_caller_asked_about": "" if ticket.get("intent") in (None, "none") else INTENT_LABELS.get(ticket["intent"], ""),
+            "claim": ticket.get("claim") or describe_hints(ticket["claim_hints"]) if ticket.get("claim") or ticket.get("claim_hints") else "",
+            "topics_already_covered": len(ticket.get("topics_discussed") or []),
+            "notes": len(ticket.get("notes") or []),
+        }
+        has_context = any(passed_along.values())
+        if has_context:
+            text = (
+                f"{lead} I'm connecting you with a human representative now. I've passed along what you've told "
+                f"me so you won't have to repeat yourself, and your reference is {out['ticket_id']}."
+            )
+            handover = "Say what they told you has been passed along (see facts.handoff.passed_along), so they will not have to repeat it."
+        else:
+            text = (
+                f"{lead} I'm connecting you with a human representative now. I've noted why I'm transferring "
+                f"you, and your reference is {out['ticket_id']}."
+            )
+            handover = "Say the reason for the transfer has been noted. Do not say they will not have to repeat themselves: nothing else was captured."
         cover = [
             "Tell the caller you are connecting them with a human representative now.",
-            "Say their details so far have been passed along so they will not have to repeat themselves.",
+            handover,
             f"Give the reference {out['ticket_id']}.",
         ]
         if not was_verified:
@@ -383,7 +428,14 @@ class PolicyBase:
             s, t, act,
             goal=f"Hand the conversation to a human representative. Reason: {reason}.",
             fallback=text,
-            facts={"handoff": {"ticket_id": out["ticket_id"], "reason": reason, "identity_verified": was_verified}},
+            facts={
+                "handoff": {
+                    "ticket_id": out["ticket_id"],
+                    "reason": reason,
+                    "identity_verified": was_verified,
+                    "passed_along": passed_along if has_context else "only the reason for the transfer",
+                }
+            },
             cover=cover,
             must_not=["Do not keep persuading or ask further questions."],
         )
@@ -404,10 +456,19 @@ class PolicyBase:
             fixed=True,
         )
 
-    def _out_of_scope(self, s: Session, t: TurnCtx) -> Directive:
+    def _out_of_scope(self, s: Session, u: Understanding, t: TurnCtx) -> Directive:
         s.oos_streak += 1
         s.oos_total += 1
         t.empathy, t.tone = "", ""
+        if s.phase == VERIFY_ID and u.refuses_verification:
+            # An instruction-override or "I'm already verified" message is pressure to skip
+            # the gate. It counts towards knowing when to stop persuading.
+            s.refusal_count += 1
+            if s.refusal_count > MAX_PERSUASION:
+                return self._escalate(
+                    s, t, "caller declined identity verification",
+                    lead="I understand, and I won't keep pressing you.",
+                )
         if s.oos_streak >= OOS_ESCALATE_AT:
             return self._escalate(
                 s, t, "repeated out-of-scope requests",
@@ -432,6 +493,7 @@ class PolicyBase:
                 facts=facts,
                 cover=["Decline politely without answering the question.", "Ask whether they would like a human representative."],
                 must_not=["Do not answer the out-of-scope question, even partly."],
+                fixed=True,
             )
         opener = (
             "I'm sorry, that's outside what I can help with here. I can only assist with insurance claims and related questions."
@@ -445,12 +507,17 @@ class PolicyBase:
             facts=facts,
             cover=["Decline politely without answering the question.", "Bring the caller back to where the call stands."],
             must_not=["Do not answer the out-of-scope question, even partly."],
+            fixed=True,
         )
 
     def _redirect(self, s: Session) -> str:
         if s.phase == VERIFY_ID:
             if s.consent.get("status") == "pending":
                 return "I'm still waiting for the policyholder's approval before we can continue."
+            if s.identity_ok:
+                if s.pending == "rep_name":
+                    return "To continue, I still need your own full name."
+                return "I can't share anything about the claim without the policyholder's approval."
             matched = s.verification.get("matched", [])
             if matched:
                 return f"To continue, I still need {count_phrase(REQUIRED_MATCHES - len(matched))} to verify your identity."

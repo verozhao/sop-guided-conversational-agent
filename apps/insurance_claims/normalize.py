@@ -30,6 +30,7 @@ _NUM_RE = re.compile(r"(?<!\d)(\d{1,2})[-/.](\d{1,2})[-/.](\d{4}|\d{2})(?!\d)")
 _MDY_RE = re.compile(rf"\b({MONTH_ALT})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})\b", re.I)
 _DMY_RE = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({MONTH_ALT})\.?,?\s+(\d{{4}})\b", re.I)
 _MD_RE = re.compile(rf"\b({MONTH_ALT})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", re.I)
+_DM_RE = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({MONTH_ALT})\b", re.I)
 
 
 def _safe_date(year: int, month: int, day: int) -> date | None:
@@ -77,6 +78,10 @@ def find_dates(text: str) -> list[tuple[int | None, int, int, tuple[int, int]]]:
         add(_expand_year(int(m.group(3))), int(m.group(1)), int(m.group(2)), m.span())
     for m in _MD_RE.finditer(text):
         add(None, MONTHS[m.group(1).lower().rstrip(".")], int(m.group(2)), m.span())
+    for m in _DM_RE.finditer(text):
+        if m.group(2) == "may":
+            continue  # "these 3 may take a week" is not a date
+        add(None, MONTHS[m.group(2).lower().rstrip(".")], int(m.group(1)), m.span())
     return sorted(found, key=lambda item: item[3][0])
 
 
@@ -158,16 +163,23 @@ def mask_email(email: str) -> str:
     return f"{local[0]}***@{domain}"
 
 
-_SSN_RE = re.compile(r"(?<![\d-])\d{3}[- ]?\d{2}[- ]?(\d{4})(?![\d-])")
+_SSN_SEP = r"\s*[-\u2010-\u2015./ ]\s*"
+_SSN_FORMATTED_RE = re.compile(rf"(?<!\d)\d{{3}}{_SSN_SEP}\d{{2}}{_SSN_SEP}(\d{{4}})(?!\d)")
+_SSN_BARE_RE = re.compile(r"(?<!\d)\d{5}(\d{4})(?!\d)")
+_SSN_WORD_RE = re.compile(r"\bssn\b|\bsocial\b", re.I)
 
 
 def redact_ssn(text: str) -> str:
     """Replace a full SSN with a marker that keeps only the last four digits.
 
     Applied to every caller message before it is stored, logged or sent to a
-    model, so a full SSN typed by mistake never leaves the request.
+    model. Covers the 3-2-4 layout with hyphens, dashes, dots, slashes or
+    spaces, and a bare nine-digit number when the message mentions an SSN.
     """
-    return _SSN_RE.sub(lambda m: f"[SSN ending {m.group(1)}]", text or "")
+    text = _SSN_FORMATTED_RE.sub(lambda m: f"[SSN ending {m.group(1)}]", text or "")
+    if _SSN_WORD_RE.search(text):
+        text = _SSN_BARE_RE.sub(lambda m: f"[SSN ending {m.group(1)}]", text)
+    return text
 
 
 def join_items(items: list[str], conjunction: str = "and") -> str:

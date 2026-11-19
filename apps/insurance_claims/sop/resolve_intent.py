@@ -34,25 +34,50 @@ class ResolveIntentPhase(PolicyBase):
         intro_cover = ["Confirm briefly that verification is complete."] if t.just_verified else []
 
         if not claims:
-            if not t.entered and (u.done or (s.pending == "anything_else" and u.affirmation == "no")):
+            if not t.entered and (u.done or t.declined_human):
                 self.graph.move(s, POST_PROCESS, "no claim to process and the caller needs nothing else", t.trace)
                 return None
-            s.pending = "anything_else"
+            s.pending = "human_offer"
             return self._directive(
                 s, t, "NO_CLAIMS",
-                goal="There are no claims on the caller's policy. Say so and offer a human representative for anything beyond that.",
+                goal="There are no claims on the caller's policy. Say so and ask whether they would like a human representative.",
                 fallback=(
                     f"{intro}I don't see any claims on file under this policy. If you were expecting one, or "
-                    f"want to start a new claim, I can connect you with a human representative. Is there "
-                    f"anything else I can help you with?"
+                    f"want to start a new claim, a human representative can help with that. Would you like me "
+                    f"to connect you?"
                 ),
                 facts={"claims_on_file": []},
-                cover=intro_cover + ["Say there are no claims on file.", "Offer a human representative, and ask if there is anything else."],
+                cover=intro_cover + ["Say there are no claims on file.", "Ask one question: whether they would like a human representative."],
             )
 
-        if not t.entered and u.done and not self._has_request(s, u, t):
+        if not t.entered and (u.done or t.declined_human) and not self._has_request(s, u, t):
             self.graph.move(s, POST_PROCESS, "the caller needs nothing else", t.trace)
             return None
+
+        # The caller was shown the claims on file and it is none of them (a new claim,
+        # another policy, something else). Listing them again would go round in circles.
+        picked = bool(u.selected_case_id or t.turn_hints)
+        if not t.entered and s.pending == "choose_case" and not picked:
+            s.unresolved_asks += 1
+            if u.affirmation == "no" or s.unresolved_asks >= 2:
+                s.unresolved_asks = 0
+                s.pending = "human_offer"
+                return self._directive(
+                    s, t, "NOT_ON_FILE",
+                    goal="What the caller needs is not one of the claims on file. Say you can only help with those here, and ask whether they would like a human representative.",
+                    fallback=(
+                        "It sounds like what you need isn't one of the claims on file. From here I can only help "
+                        "with those, and I can't start a new claim. A human representative can do both. Would you "
+                        "like me to connect you?"
+                    ),
+                    facts={"claims_on_file": claims, "what_this_line_can_do": "Answer questions about the claims on file. It cannot open a new claim."},
+                    cover=[
+                        "Say you can only help with the claims on file here and cannot start a new claim.",
+                        "Ask one question: whether they would like a human representative.",
+                    ],
+                )
+        elif picked:
+            s.unresolved_asks = 0
 
         by_id = {c["claim_id"]: c for c in claims}
         if t.exclude_case:

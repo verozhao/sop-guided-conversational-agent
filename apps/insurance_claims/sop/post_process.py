@@ -8,10 +8,12 @@ remembered: "send" is confirmed before sending, "skip" is honoured directly.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sop_harness.core import Directive
 
+from ..email_summary import summary_sections
 from ..state import CLOSED, POST_PROCESS, PROCESS_CASE, RESOLVE_INTENT, Session
 from ..tools import email_target
 from ..understanding import Understanding
@@ -20,6 +22,8 @@ from .common import (
     PolicyBase,
     TurnCtx,
 )
+
+EMAIL_IN_TEXT = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
 
 class PostProcessPhase(PolicyBase):
@@ -65,7 +69,14 @@ class PostProcessPhase(PolicyBase):
             }
         }
 
+        preview = summary_sections(s, self.data, self.clock())
+        offer_facts["email_summary"]["would_contain"] = {
+            "what_we_discussed": preview["what_we_discussed"],
+            "follow_up_items_and_next_steps": preview["follow_up_items_and_next_steps"],
+        }
+
         if t.entered:
+            s.email["reasks"] = 0
             if s.email["decision"] is not None and not s.email["new_since"]:
                 return self._close(s, t, "CLOSING", lead="")
             if m.email_pref == "skip" and s.email["decision"] is None:
@@ -109,7 +120,8 @@ class PostProcessPhase(PolicyBase):
         if choice == "none" and s.pending == "email_offer" and u.affirmation != "none":
             choice = "send" if u.affirmation == "yes" else "skip"
         party = self.data.party(s.party_id)
-        other_address = u.identity.get("email", "")
+        typed = EMAIL_IN_TEXT.search(t.text)
+        other_address = u.identity.get("email", "") or (typed.group(0).lower() if typed else "")
         on_file = {party.email.lower(), *(a.lower() for a in party.email_aliases)} if party else set()
         if other_address and other_address.lower() not in on_file and choice != "skip":
             s.pending = "email_offer"
@@ -143,7 +155,10 @@ class PostProcessPhase(PolicyBase):
                 s, t, "EMAIL_SENT",
                 lead=f"Done. I've sent the summary to {target}.",
                 facts={"email_sent": out},
-                cover=[f"Confirm the summary was sent to {target}."],
+                cover=[
+                    f"Confirm the summary was sent to {target}.",
+                    "If you say what it contains, stay within facts.email_sent.contains.",
+                ],
             )
         if choice == "skip":
             s.email["decision"] = "skip"
@@ -154,7 +169,8 @@ class PostProcessPhase(PolicyBase):
                 cover=["Confirm that no email will be sent."],
             )
 
-        s.email["reasks"] += 1
+        if not u.process_question:
+            s.email["reasks"] += 1  # answering a question about the summary is not an unclear answer
         if s.email["reasks"] > MAX_EMAIL_REASKS:
             s.email["decision"] = "skip"
             return self._close(
@@ -189,9 +205,19 @@ class PostProcessPhase(PolicyBase):
         if s.verified and self._has_request(s, u, t):
             self._route_request(s, u, t, CLOSED)
             return None
+        if u.emotion != "neutral" or u.process_question:
+            s.pending = "human_offer"
+            return self._directive(
+                s, t, "CLOSED_CONCERN",
+                goal="The conversation was wrapped up, and the caller has come back unhappy or with a concern. Acknowledge it and ask whether they would like a human representative.",
+                fallback="If you'd like to take this further, I can connect you with a human representative. Would you like me to do that?",
+                cover=["Acknowledge what the caller said.", "Ask one question: whether they would like a human representative."],
+            )
+        t.empathy = ""
         return self._directive(
             s, t, "CLOSED_ACK",
             goal="The conversation is finished.",
-            fallback="You're welcome. Take care!",
+            fallback="You're welcome. Take care!" if u.done or u.affirmation != "none" or not t.text.strip().endswith("?")
+            else "This conversation has been wrapped up. If you have another question about a claim, just ask.",
             fixed=True,
         )

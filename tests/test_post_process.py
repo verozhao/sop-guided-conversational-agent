@@ -84,4 +84,6 @@ def test_summary_lists_every_claim_discussed(verified: Convo):
     verified.run("that's all", "yes please")
     body = verified.s.outbox[0]["body"]
     assert "CL-2048" in body and "CL-2102" in body
-    assert "No action is needed from you right now" in body
+    assert "Claim CL-2102 is open and in progress" in body
+    assert "no documents requested from you" in body
+    assert "No action is needed" not in body  # the record does not say that

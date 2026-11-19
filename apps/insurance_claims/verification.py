@@ -81,41 +81,45 @@ def verify_identity(data: ClaimsData, claimed: dict[str, str]) -> VerificationRe
             continue
         usable[name] = value
 
-    candidates = list(data.policyholders)
-    policy = claimed.get("policy_number") or ""
-    pinned = False
-    if policy:
-        by_policy = [p for p in candidates if norm_policy(p.policy_number) == norm_policy(policy)]
-        if by_policy:
-            candidates, pinned = by_policy, True
-        else:
-            result.conflicts.append("policy_number")
+    # The five details decide which record this is. The policy number only breaks a
+    # tie. A wrong policy number is reported as wrong; it never turns the caller's
+    # own correct details into mismatches.
+    policy = norm_policy(claimed.get("policy_number") or "")
+    by_policy = [p for p in data.policyholders if norm_policy(p.policy_number) == policy] if policy else []
 
     if not usable:
+        if policy and not by_policy:
+            result.conflicts.append("policy_number")
         return result
 
-    scored = [(sum(field_matches(p, n, v) for n, v in usable.items()), p) for p in candidates]
+    scored = [(sum(field_matches(p, n, v) for n, v in usable.items()), p) for p in data.policyholders]
     best_score = max(score for score, _ in scored)
     best = [p for score, p in scored if score == best_score]
 
-    if pinned:
-        record = candidates[0]
-    elif best_score == 0:
+    if best_score == 0:
         result.conflicts.extend(usable)  # nothing the caller gave matches anything
         return result
-    elif len(best) > 1:
-        # Ambiguous between records: more information is needed. A value that
-        # matches none of the tied records is still wrong and counts as such,
-        # so a tie cannot be used to guess without limit.
-        result.conflicts.extend(
-            name for name, value in usable.items() if not any(field_matches(p, name, value) for p in best)
-        )
-        return result
+    if len(best) > 1:
+        pinned = [p for p in best if p in by_policy]
+        if len(pinned) != 1:
+            # Ambiguous between records: more information is needed. A value that
+            # matches none of the tied records is still wrong and counts as such,
+            # so a tie cannot be used to guess without limit.
+            result.conflicts.extend(
+                name for name, value in usable.items() if not any(field_matches(p, name, value) for p in best)
+            )
+            return result
+        record = pinned[0]
     else:
         record = best[0]
+    if policy and record not in by_policy:
+        result.conflicts.append("policy_number")
 
     result.record = record
     for name, value in usable.items():
         (result.matched if field_matches(record, name, value) else result.conflicts).append(name)
     result.verified = len(result.matched) >= REQUIRED_MATCHES
     return result
+
+
+__all__ = ["FIELD_LABELS", "PII_FIELDS", "REQUIRED_MATCHES", "VerificationResult", "field_matches", "verify_identity"]

@@ -442,7 +442,7 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
     elif self_name:
         raw["full_name"] = self_name
 
-    # Short list-style answers during verification: "Margaret Chen, 4472"
+    # Short list-style answers during verification: "Jane Doe, 0000"
     if in_verify:
         for segment in re.split(r"[,;\n]|\band\b|[.!?](?:\s|$)", work):
             piece = segment.strip()

@@ -33,12 +33,13 @@ ANTHROPIC_API_KEY=sk-ant-... .venv/bin/uvicorn server.app:app --port 8000
 
 ### The API token
 
-The agent calls Claude through the Anthropic API. Give it a token in either way:
+The agent calls Claude through the Anthropic API. Give it a token in any of three ways:
 
-- set `ANTHROPIC_API_KEY` when you start the server, or
-- paste the token into **Setup** in the UI. It stays in that browser tab's memory, travels in the `X-API-Key` header of your chat requests, and is never written to disk or to a log.
+- set `ANTHROPIC_API_KEY` when you start the server
+- copy `.env.example` to `.env` and put the token there. The server and `docker compose` both read it, and `.env` is ignored by git
+- paste the token into **Setup** in the UI. It stays in that browser tab's memory, travels in the `X-API-Key` header of your chat requests, and is never written to disk or to a log
 
-The default model is `claude-opus-5-5` at low effort. Each turn makes two model calls (understand, then phrase). Pick another model in the UI or with `SOP_MODEL`, for example `claude-haiku-5-5` for speed.
+The default model is `claude-opus-5-5` at low effort. Each turn makes two model calls (understand, then phrase), which takes about 5 seconds and costs about 2 cents. Pick another model in the UI or with `SOP_MODEL`. `claude-haiku-5-5` answers in about 2 seconds for a small fraction of a cent.
 
 ### No token
 
@@ -213,7 +214,8 @@ apps/insurance_claims/
   fixtures/                  sample data
 server/app.py                FastAPI app
 server/static/index.html     test UI
-scripts/demo.py              scripted conversations in the terminal
+scripts/demo.py              scripted conversations in the terminal, offline
+scripts/live_check.py        the same conversations against the real model, with a spending cap
 tests/                       168 tests, all offline
 ```
 
@@ -224,12 +226,38 @@ tests/                       168 tests, all offline
 .venv/bin/pytest
 ```
 
+The suite is offline. It never reads `.env` and removes any token from the environment, so it cannot spend money.
+
 The suite covers the demo case, the verification gate, the bonus scenarios, scope control, claim resolution, the workflow paths, the email step, representative consent, harness enforcement (tool gating, illegal transitions), the output guard against leaking or overclaiming model replies, and the shape of the request sent to the Anthropic API.
 
-## Status and limits
+## Checked against the live model
 
-- No live model call was made during development, to avoid API charges. The model path is covered by scripted stand-ins and by request-shape tests against a fake client. A first run with a real token is the remaining check. If a model call fails for any reason, that turn falls back to the offline engine and the UI says so.
-- The Docker image has not been built on the development machine.
-- A safety classifier can decline a request on some models. For those models the client opts into the API's server-side fallback (`fallbacks: "default"`), and it drops the option on its own if the account does not have it.
+`scripts/live_check.py` runs scripted conversations against the real API with a spending cap, and checks the workflow outcome of every turn (phase, verification, claim chosen, email sent, nothing protected said before verification). Those checks hold whatever wording the model chooses.
+
+```bash
+.venv/bin/python scripts/live_check.py --ping                          # one tiny call to check the token
+.venv/bin/python scripts/live_check.py --scenarios happy,bonus         # capped at $0.50 by default
+.venv/bin/python scripts/live_check.py --scenarios all --model claude-haiku-5-5 --max-usd 0.10
+```
+
+Ten scenarios are included: the seven demo scripts plus three that only a model can follow (spoken-style language such as "bday is march fifteenth nineteen eighty five", prompt injection before verification, and an anxious caller with a missing document).
+
+Results on 2026-11-19:
+
+| Model | Turns | Outcome checks | Replies written by the model | Median time per turn | Cost per turn |
+|---|---|---|---|---|---|
+| `claude-opus-5-5` (default) | 61 | all passed | 61 of 61 | 4.6 s | about $0.02 |
+| `claude-sonnet-5-5` | 12 | all passed | 12 of 12 | 4.0 s | about $0.01 |
+| `claude-haiku-5-5` | 53 | all passed | 51 of 53 | 2.1 s | under $0.001 |
+| `claude-fable-5-2` | 1 | passed | 1 of 1 | 4.9 s | about $0.08 |
+
+The two Haiku replies that were not used had been rejected by the output guard for wording that was in fact correct. Both guard rules were corrected and are covered by `tests/test_regressions.py`, along with the other problems the live runs exposed.
+
+The Docker image was built and run: the container passes its health check, serves all seven demo scripts, and answers through the model when the token is passed with `-e`.
+
+## Limits
+
+- A safety classifier can decline a request on some models. For those models the client opts into the API's server-side fallback (`fallbacks: "default"`), and drops the option on its own if the account does not have it. If any model call fails, that turn runs on the offline engine and the UI says so.
 - The offline engine is English only and rule-based.
 - Sessions live in memory. Email delivery is simulated: the message appears in the Outbox panel.
+- There is no hosted instance. The image runs on any container host and honours `PORT`.

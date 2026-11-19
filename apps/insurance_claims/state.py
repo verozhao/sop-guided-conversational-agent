@@ -32,6 +32,7 @@ class Memory:
     caller_role: str = "unknown"
     representative_name: str = ""
     intent: str = "none"
+    extra_intents: list[str] = field(default_factory=list)
     intent_consumed: bool = False
     case_hints: dict[str, Any] = field(default_factory=dict)
     hints_consumed: bool = False
@@ -67,16 +68,18 @@ class Session:
 
     # conversation control
     pending: str = "identity"
-    human_offer_open: bool = False
     oos_streak: int = 0
     oos_total: int = 0
     distress_streak: int = 0
     distress_offer_made: bool = False
     last_empathy: str = ""
+    mixed_note_turn: int = -10
+    answers_given: int = 0
 
     # case handling
     case_id: str | None = None
     last_candidates: list[str] = field(default_factory=list)
+    unresolved_asks: int = 0
     last_intent: str = "none"
     discussed: list[dict[str, Any]] = field(default_factory=list)
 
@@ -85,6 +88,8 @@ class Session:
     outbox: list[dict[str, Any]] = field(default_factory=list)
     handoff: dict[str, Any] | None = None
 
+    # facts already given to this verified caller in earlier turns (for the output guard)
+    grounded: list[str] = field(default_factory=list)
     history: list[dict[str, Any]] = field(default_factory=list)
     traces: list[dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)

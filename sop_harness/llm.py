@@ -52,7 +52,7 @@ class LLMError(Exception):
     @property
     def fatal_for_turn(self) -> bool:
         """True when a second call in the same turn would fail the same way."""
-        return self.kind in {"auth", "permission", "model", "billing", "rate_limit", "connection"}
+        return self.kind in {"auth", "permission", "model", "billing", "rate_limit", "connection", "bad_request", "budget"}
 
 
 @dataclass
@@ -158,14 +158,19 @@ class AnthropicLLM:
 
         response = self._send(kwargs)
 
-        if response.stop_reason == "refusal":
+        try:
+            stop_reason = response.stop_reason
+            text = "".join(block.text for block in response.content if block.type == "text").strip()
+            usage = response.usage
+        except (AttributeError, TypeError) as exc:
+            # A gateway in front of the API answered 200 with something that is not a message.
+            raise LLMError("bad_output", "The model endpoint returned a response that is not a message.") from exc
+        if stop_reason == "refusal":
             raise LLMError("refusal", "The model declined this request.")
-        if response.stop_reason == "max_tokens":
+        if stop_reason == "max_tokens":
             raise LLMError("truncated", "The model reply was cut off by max_tokens.")
-        text = "".join(block.text for block in response.content if block.type == "text").strip()
         if not text:
             raise LLMError("empty", "The model returned no text.")
-        usage = response.usage
         return LLMResult(
             text=text,
             model=getattr(response, "model", self.model) or self.model,
@@ -184,8 +189,11 @@ class AnthropicLLM:
                         betas=[FALLBACK_BETA], fallbacks="default", **kwargs
                     )
                 except sdk.BadRequestError as exc:
-                    # The fallback beta may not be enabled for this account.
-                    # Degrade to a plain request instead of failing the turn.
+                    # Only when the fallback option itself was rejected (the beta is not
+                    # enabled for this account): send a plain request instead. Any other
+                    # 400 would fail the same way again, so it is raised as it is.
+                    if not any(word in _short(exc).lower() for word in ("beta", "fallback")):
+                        raise
                     self._fallbacks_on = False
                     self.fallback_note = _short(exc)
             return self.client.messages.create(**kwargs)
@@ -204,6 +212,10 @@ class AnthropicLLM:
             raise LLMError(kind, f"Model API error {exc.status_code}: {_short(exc)}") from exc
         except sdk.APIConnectionError as exc:
             raise LLMError("connection", "Could not reach the model API (network or timeout).") from exc
+        except LLMError:
+            raise
+        except Exception as exc:  # anything else from the client is still only a failed model call
+            raise LLMError("api", f"Unexpected error from the model client: {type(exc).__name__}") from exc
 
 
 def _short(exc: Exception) -> str:

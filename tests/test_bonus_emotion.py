@@ -89,7 +89,7 @@ def test_sustained_frustration_after_verification_brings_an_offer_of_a_human(ver
     verified.say("This is ridiculous, why was it denied?!")
     verified.say("Seriously? I already sent those documents!")
     reply = verified.say("Come on, this is a waste of my time. What is the status?")
-    assert "human representative" in reply
-    assert verified.s.phase == PROCESS_CASE  # offered, not forced
+    assert "speak with a person" in reply and reply.rstrip().endswith("connect you.")
+    assert verified.s.phase == PROCESS_CASE  # offered as a statement, not forced and not a second question
     verified.say("yes, connect me to a person")
     assert verified.s.phase == ESCALATED
