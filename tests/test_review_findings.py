@@ -595,6 +595,17 @@ def test_a_response_that_is_not_a_message_is_a_failed_call(body):
     assert caught.value.kind == "bad_output"
 
 
+def test_this_claim_keeps_the_focus_even_when_a_model_reads_a_date_as_a_hint(agent: Agent):
+    c = Convo(agent)
+    c.say(DEMO_UTTERANCE)
+    c.llm = ScriptedLLM(
+        on_json=lambda *_: reading(intent="appeal_or_next_steps", case_hints={"month": 3, "year": 2026}, question="Is the deadline in March?"),
+        on_text=lambda *_: "Yes, the appeal deadline is March 18, 2026.",
+    )
+    c.say("The deadline for this claim is in March, right?")
+    assert c.s.case_id == "CL-2048" and c.act == "ANSWER" and c.s.phase == PROCESS_CASE
+
+
 def test_the_model_can_report_more_to_ask(agent: Agent):
     c = at_email_offer(agent)
     c.llm = ScriptedLLM(on_json=lambda *_: reading(more=True), on_text=lambda *_: "Of course, what else would you like to know?")

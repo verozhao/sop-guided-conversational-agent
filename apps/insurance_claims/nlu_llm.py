@@ -68,7 +68,7 @@ intent (what the caller wants to know or do about a claim, if this message says)
   none: no claim request in this message.
 
 case_hints (clues about WHICH claim, from this message only)
-  claim_type: other means a kind that is not listed. status: denied, open (in progress, pending, under review) or closed (settled, paid, completed). month and year the claim was filed or the event happened; resolve "last year" or "this year" with today's date; 0 when not stated. Never take hints from a date of birth.
+  claim_type: other means a kind that is not listed. status: denied, open (in progress, pending, under review) or closed (settled, paid, completed). month and year the claim was filed or the event happened; resolve "last year" or "this year" with today's date; 0 when not stated. Never take hints from a date of birth. When current_claim is set, give hints only if the caller points to a different claim ("my auto claim", "the one from 2025"). The date of something else (when a document was sent, a deadline, an appointment) is not a hint, and "this claim" or "it" means the current claim.
 
 also_asks
   Other things the same message asks about the claim, when it asks about more than one ("how much was it for, and when is the deadline?" is payment_or_amounts with also_asks appeal_or_next_steps). [] otherwise.

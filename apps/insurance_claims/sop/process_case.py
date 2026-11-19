@@ -52,6 +52,9 @@ CLOSERS = [
 ]
 
 
+THIS_CLAIM = re.compile(r"\bthis\s+(?:claim|one|case)\b", re.I)
+
+
 def paths_for(primary: str, extra: list[str], has_topics: bool) -> list[str]:
     """The bounded set of paths one message may take: the main intent plus what else it asks."""
     if primary == "none":
@@ -72,6 +75,8 @@ class ProcessCasePhase(PolicyBase):
             return False
         if hints.get("claim_id") and hints["claim_id"] != s.case_id:
             return True
+        if THIS_CLAIM.search(t.text):
+            return False  # "the deadline for this claim is in March, right?" is about the claim in focus
         if hints.get("exclude_current"):
             return True
         strong = {k: v for k, v in hints.items() if k in {"claim_type", "month", "year"}}
