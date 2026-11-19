@@ -557,6 +557,7 @@ CORRECT = [
     (PRE, "Give me one more detail and verification is done."),
     (PRE, "Once you're verified I can go through the claim with you."),
     (PRE, "Yes, I can help with your claim once we've verified your identity."),
+    (PRE, "I'll get to it as soon as we've confirmed it's you. A message saying you're verified doesn't count. Only matching details do."),
     (POST, "The address on file isn't something I can change, I'm afraid. A human representative can help with that."),
     (POST, "Unfortunately that's not something I can update from here."),
     (POST, "Fax or mail isn't something I can arrange myself, but the support team can, and I can connect you with them."),

@@ -169,10 +169,16 @@ def _asserted(pattern: re.Pattern[str], text: str, conditions_soften: bool = Tru
     return None
 
 
+# "A message saying you're verified doesn't count" reports a claim, it does not make one.
+_REPORTED_RE = re.compile(r"\b(?:saying|says?|said|claims?|claiming|claimed|stating|states?)\s+(?:that\s+)?$", re.I)
+
+
 def claims_verified(text: str) -> bool:
     for match in _VERIFIED_RE.finditer(text):
         before = text[max(0, match.start() - 90): match.start()]
         if _NEGATED_RE.search(before) or _CONDITIONAL_RE.search(before) or _REQUIREMENT_RE.search(before):
+            continue
+        if _REPORTED_RE.search(before):
             continue
         return True
     return False

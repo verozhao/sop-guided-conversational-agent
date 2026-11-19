@@ -49,7 +49,7 @@ The default model is `claude-opus-5-5` at low effort. Each turn makes two model 
 
 ### No token
 
-Everything also runs without a token. Leave the field empty and the agent uses its offline engine: rule-based understanding and template replies, driven by the same SOP policy. This is how the test suite runs. It handles common phrasings, which is narrower than what the model handles. It is built to fail safe: an email, a transfer, a change of claim or a counted identity attempt is read only from unambiguous wording, and an unclear message is asked about again.
+Everything also runs without a token. Leave the field empty and the agent uses its offline engine: rule-based understanding and template replies, driven by the same SOP policy. This is how the test suite runs. It handles common phrasings, which is narrower than what the model handles. It is built to fail safe where a rule can decide it: an email, a transfer, a change of claim and a counted identity attempt are read from clear wording, mixed or unclear wording is asked about again, and when a caller mentions somebody else without saying who is calling, the agent asks before it opens the gate. It is still a rule engine, so unusual phrasings can be misread.
 
 ## Try it
 
@@ -176,17 +176,17 @@ The question about the denial is saved and answered as soon as verification comp
 
 Someone calling for a policyholder has to pass three checks: the policyholder's details match, the caller is listed as an authorized representative, and the policyholder approves a consent request. The consent status comes from `consent_scenarios.json` (choose `default` or `timeout` in the UI before starting a conversation). Until consent is approved the session stays in VERIFY_ID. A request that expires is not sent again: the caller is offered a person, and then handed to one.
 
-This gate depends on what the caller says about themselves ("I'm her husband", "I'm calling for Margaret Chen"). Someone who presents three correct details as their own is treated as the policyholder, as the three-detail rule says. A caller verified as the policyholder who later says they are acting for someone else is handed to a person.
+This gate depends on what the caller says about themselves ("I'm her husband", "I'm calling for Margaret Chen"). When a caller mentions somebody else ("my wife asked me to call") without saying who is calling, the agent asks "are you the policyholder yourself?" once the details match and before anything is shared. Someone who presents three correct details as their own and mentions nobody else is treated as the policyholder, as the three-detail rule says. A caller verified as the policyholder who later says they are acting for someone else is handed to a person.
 
 ### Output guard
 
 The first protection is structural: the model is given no record data before verification, and only the tool results of the current path after it. The guard is a second check on what the model wrote. A reply is released only if:
 
-- every claim number, policy number, email address, phone number, dollar amount, date and count of days in it is grounded. Grounded means it appears in this turn's facts, was said by the caller, or was in the facts of an earlier turn after verification. An amount may also be the sum or difference of two grounded amounts
+- every claim number, policy number, email address, phone number, web address, dollar amount, percentage, date, time and length of time in it is grounded. Grounded means it appears in this turn's facts, was said by the caller, or was in the facts of an earlier turn after verification. An amount may also be the sum or difference of two grounded amounts
 - it contains no value held only in the records (identity numbers, other people's names, denial reasons, requested documents)
 - before verification, it does not say the caller is verified, that it can see a record, or what the status of a claim is
 - it does not say that something was sent or that a transfer happened unless the workflow did that in this turn
-- it does not promise an outcome ("it will be approved") or offer an action the assistant cannot take ("I can expedite that")
+- it does not promise an outcome ("it will be approved"), offer an action the assistant cannot take ("I can expedite that") or report one as done ("I've reopened the claim")
 
 Otherwise the deterministic reply is sent and the rejection is shown in the inspector. The guard works on patterns. It covers the usual ways of writing these things, not every possible paraphrase, which is why it is the second line and not the first.
 
@@ -233,7 +233,7 @@ server/app.py                FastAPI app
 server/static/index.html     test UI
 scripts/demo.py              scripted conversations in the terminal, offline
 scripts/live_check.py        the same conversations against the real model, with a spending cap
-tests/                       410 tests, all offline
+tests/                       630 tests, all offline
 ```
 
 ## Tests
@@ -245,7 +245,7 @@ tests/                       410 tests, all offline
 
 The suite is offline. It never reads `.env` and removes any token from the environment, so it cannot spend money.
 
-The suite covers the demo case, the verification gate, the bonus scenarios, scope control, claim resolution, the workflow paths, the email step, representative consent, harness enforcement (tool gating, illegal transitions), the output guard against leaking or overclaiming model replies, and the shape of the request sent to the Anthropic API. `tests/test_review_findings.py` holds one regression test for each problem found by the code review before submission. `ruff check .` passes with the configuration in `ruff.toml`.
+The suite covers the demo case, the verification gate, the bonus scenarios, scope control, claim resolution, the workflow paths, the email step, representative consent, harness enforcement (tool gating, illegal transitions), the output guard against leaking or overclaiming model replies, and the shape of the request sent to the Anthropic API. `tests/test_review_findings.py` and `tests/test_second_review.py` hold a regression test for each problem found by the two code reviews before submission. `ruff check .` passes with the configuration in `ruff.toml`.
 
 ## Checked against the live model
 
@@ -260,25 +260,22 @@ The suite covers the demo case, the verification gate, the bonus scenarios, scop
 
 Ten scenarios are included: the seven demo scripts plus three that only a model can follow (spoken-style language such as "bday is march fifteenth nineteen eighty five", prompt injection before verification, and an anxious caller with a missing document).
 
-Results on 2026-11-19, before the last round of review fixes:
+Results on 2026-11-19, all ten scenarios on the final version:
 
 | Model | Turns | Outcome checks | Replies written by the model | Median time per turn | Cost per turn |
 |---|---|---|---|---|---|
-| `claude-opus-5-5` (default) | 61 | all passed | 61 of 61 | 4.6 s | about $0.02 |
-| `claude-sonnet-5-5` | 12 | all passed | 12 of 12 | 4.0 s | about $0.01 |
-| `claude-haiku-5-5` | 53 | all passed | 51 of 53 | 2.1 s | under $0.001 |
-| `claude-fable-5-2` | 1 | passed | 1 of 1 | 4.9 s | about $0.08 |
+| `claude-opus-5-5` (default) | 53 | all passed | 49 of 53 | 4.3 s | about $0.02 |
+| `claude-haiku-5-5` | 53 | all passed | 49 of 53 | 1.9 s | under $0.001 |
 
-The two Haiku replies that were not used had been rejected by the output guard for wording that was in fact correct. Both guard rules were corrected and are covered by `tests/test_regressions.py`, along with the other problems the live runs exposed.
-
-The last round of review fixes came after these runs. It added two fields to the understanding schema, extended the understanding prompt and widened the output guard. On the final version the outcome checks of the seven scripted scenarios pass on the offline engine (`--offline`, also run by the test suite), and the model path is covered by the scripted tests. The live runs have not been repeated on the final version, so repeat them with your own token if you want the numbers for it.
+The replies not written by the model are the out-of-scope declines, which use fixed wording by design (three or four per run), and one Opus reply that the output guard rejected although it was correct ("A message saying you're verified doesn't count"). That guard rule was corrected and has a regression test. `claude-sonnet-5-5` (12 turns) and `claude-fable-5-2` (1 turn) passed on an earlier version and were not run again.
 
 The Docker image was built and run: the container passes its health check, serves all seven demo scripts, and answers through the model when the token is passed with `-e`.
 
 ## Limits
 
-- A safety classifier can decline a request on some models. For those models the client opts into the API's server-side fallback (`fallbacks: "default"`), and drops the option on its own if the account does not have it. If a model call fails in any way, that turn is completed by the offline engine and the UI says so.
+- A safety classifier can decline a request on some models. For those models the client opts into the API's server-side fallback (`fallbacks: "default"`), and drops the option on its own if the account does not have it. If a model call fails in any way the turn still completes: the offline rules read the message, or the built-in wording is used for the reply, and the UI says which.
 - The offline engine is English only and rule-based. It answers what its rules recognise and asks again otherwise.
+- Memory keeps one claim reference at a time. Two questions about two different claims asked before verification are both remembered, and answered for the claim named last.
 - The limit on failed identity attempts is per conversation. A new conversation starts a new count, and limiting attempts across conversations would need caller identification that this demo does not have.
 - A policyholder is told which of their details matched ("I've confirmed your full name"), which makes verification easier to complete and also tells a guesser which values were right. A representative is not told. Wrong values are limited by the attempt count.
 - Sessions live in memory. Email delivery is simulated: the message appears in the Outbox panel.
