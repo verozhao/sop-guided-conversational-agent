@@ -53,7 +53,7 @@ INTENT_LABELS = {
     "document_requirements": "which documents are needed and how to provide them",
     "appeal_or_next_steps": "the appeal and next steps",
     "payment_or_amounts": "the payment amounts on the claim",
-    "general_claim_question": "general questions about the claim",
+    "general_claim_question": "an overview of the claim",
 }
 TOPIC_LABELS = {
     "missing_required_material_alternatives": "what to do if a requested document is not available",
@@ -74,6 +74,7 @@ class Understanding:
     declined_fields: list[str] = field(default_factory=list)
     refuses_verification: bool = False
     intent: str = "none"
+    extra_intents: list[str] = field(default_factory=list)
     case_hints: dict[str, Any] = field(default_factory=dict)
     selected_case_id: str = ""
     question: str = ""
@@ -84,7 +85,11 @@ class Understanding:
     affirmation: str = "none"
     email_summary_choice: str = "none"
     done: bool = False
+    more: bool = False                 # has something else to ask, not asked yet ("wait, one more thing")
     notes: list[str] = field(default_factory=list)
+    guessed: list[str] = field(default_factory=list)  # what the offline rules only inferred (a name, the caller's role)
+    partial: list[str] = field(default_factory=list)  # identity details given incompletely ("March 15", a bare year)
+    mentions_other: bool = False       # a relative or "for her" came up while the caller's role is unknown
     source: str = "rules"
 
     def to_dict(self) -> dict[str, Any]:
@@ -93,7 +98,12 @@ class Understanding:
     @property
     def has_request(self) -> bool:
         """The caller asked for something about a claim in this message."""
-        return self.intent != "none" or bool(self.question) or bool(self.case_hints) or bool(self.selected_case_id)
+        return self.intent != "none" or self.asks_about_claim or bool(self.case_hints) or bool(self.selected_case_id)
+
+    @property
+    def asks_about_claim(self) -> bool:
+        """A question that is about a claim, as opposed to the process or the email summary."""
+        return bool(self.question) and not self.process_question and self.email_summary_choice == "none"
 
 
 def _string(description: str) -> dict[str, Any]:
@@ -139,13 +149,18 @@ UNDERSTANDING_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "description": "The caller refuses or pushes back on verifying, or demands claim information without it.",
         },
-        "intent": _enum(INTENTS, "What the caller wants about a claim, if stated in this message."),
+        "intent": _enum(INTENTS, "The main thing the caller wants about a claim, if stated in this message."),
+        "also_asks": {
+            "type": "array",
+            "items": {"type": "string", "enum": INTENTS[1:]},
+            "description": "Other things this same message asks about the claim, besides intent.",
+        },
         "case_hints": {
             "type": "object",
             "additionalProperties": False,
             "description": "Clues in THIS message about which claim is meant.",
             "properties": {
-                "claim_id": _string("Claim number if stated, for example CL-2048."),
+                "claim_id": _string("Claim number if stated, for example CL-0000."),
                 "claim_type": _enum(CLAIM_TYPES, "Kind of claim."),
                 "status": _enum(CLAIM_STATUSES, "Claim status the caller mentions."),
                 "month": {"type": "integer", "description": "Month the claim was filed, 1 to 12. 0 if not stated."},
@@ -171,6 +186,10 @@ UNDERSTANDING_SCHEMA: dict[str, Any] = {
         "affirmation": _enum(AFFIRMATIONS, "Whether the message answers the agent's last question with yes or no."),
         "email_summary_choice": _enum(EMAIL_CHOICES, "Whether the caller wants the email summary sent or skipped."),
         "done": {"type": "boolean", "description": "The caller signals they need nothing more."},
+        "more": {
+            "type": "boolean",
+            "description": "The caller says they have something else to ask or are not finished, without asking it yet.",
+        },
         "notes": {
             "type": "array",
             "items": {"type": "string"},
@@ -178,11 +197,28 @@ UNDERSTANDING_SCHEMA: dict[str, Any] = {
         },
     },
     "required": [
-        "scope", "caller_role", "identity", "declined_fields", "refuses_verification", "intent",
+        "scope", "caller_role", "identity", "declined_fields", "refuses_verification", "intent", "also_asks",
         "case_hints", "selected_case_id", "question", "followup_topics", "process_question",
-        "emotion", "wants_human", "affirmation", "email_summary_choice", "done", "notes",
+        "emotion", "wants_human", "affirmation", "email_summary_choice", "done", "more", "notes",
     ],
 }
+
+
+# Words that describe a relationship or role. A "name" containing one is not a name.
+ROLE_WORDS = {
+    "lawyer", "attorney", "representative", "rep", "son", "daughter", "wife", "husband", "spouse", "partner",
+    "mother", "father", "mom", "mum", "dad", "brother", "sister", "friend", "caregiver", "guardian", "agent",
+    "assistant", "policyholder", "her", "his", "their", "my", "the",
+}
+
+
+def clean_representative_name(value: str) -> str:
+    """The caller's own personal name, or "" when the text is a description such as "her lawyer"."""
+    name = norm_name(value)
+    tokens = [token.lower() for token in name.split()]
+    if not tokens or any(token in ROLE_WORDS for token in tokens):
+        return ""
+    return name
 
 
 def _pick(value: Any, allowed: list[str], default: str) -> str:
@@ -247,10 +283,11 @@ def understanding_from_json(raw: dict[str, Any], today: date | None = None) -> U
         scope=_pick(raw.get("scope"), SCOPES, "in_scope"),
         caller_role=_pick(raw.get("caller_role"), ROLES, "unknown"),
         identity=normalize_identity(identity_raw, today),
-        representative_name=norm_name(str(identity_raw.get("representative_name") or "")),
+        representative_name=clean_representative_name(str(identity_raw.get("representative_name") or "")),
         declined_fields=[f for f in raw.get("declined_fields") or [] if f in PII_FIELDS],
         refuses_verification=bool(raw.get("refuses_verification")),
         intent=_pick(raw.get("intent"), INTENTS, "none"),
+        extra_intents=[i for i in dict.fromkeys(raw.get("also_asks") or []) if i in INTENTS[1:]][:3],
         case_hints=normalize_hints(hints_raw),
         selected_case_id=norm_claim_id(str(raw.get("selected_case_id") or "")),
         question=str(raw.get("question") or "").strip()[:300],
@@ -261,6 +298,7 @@ def understanding_from_json(raw: dict[str, Any], today: date | None = None) -> U
         affirmation=_pick(raw.get("affirmation"), AFFIRMATIONS, "none"),
         email_summary_choice=_pick(raw.get("email_summary_choice"), EMAIL_CHOICES, "none"),
         done=bool(raw.get("done")),
+        more=bool(raw.get("more")) and not bool(raw.get("done")),
         notes=[str(n).strip()[:200] for n in (raw.get("notes") or []) if str(n).strip()][:5],
         source="llm",
     )

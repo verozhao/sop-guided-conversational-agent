@@ -10,6 +10,7 @@ to repeat them.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sop_harness.core import Directive
@@ -25,6 +26,13 @@ from .common import (
     filter_claims,
 )
 
+# The caller says outright that what they need is not among the claims shown.
+NOT_LISTED = re.compile(
+    r"\bnone\s+of\b|\bneither\b|\bnot\s+(?:on|in)\s+(?:the|your|that)\s+list\b|\bnot\s+(?:one|any)\s+of\b|"
+    r"\bnew\s+(?:claim|one)\b|\b(?:file|open|start|submit)\s+a\s+(?:new\s+)?claim\b|\b(?:another|different)\s+policy\b",
+    re.I,
+)
+
 
 class ResolveIntentPhase(PolicyBase):
     def _resolve(self, s: Session, u: Understanding, t: TurnCtx) -> Directive | None:
@@ -34,27 +42,74 @@ class ResolveIntentPhase(PolicyBase):
         intro_cover = ["Confirm briefly that verification is complete."] if t.just_verified else []
 
         if not claims:
-            if not t.entered and (u.done or (s.pending == "anything_else" and u.affirmation == "no")):
+            if not t.entered and (u.done or t.declined_human):
                 self.graph.move(s, POST_PROCESS, "no claim to process and the caller needs nothing else", t.trace)
                 return None
-            s.pending = "anything_else"
+            s.pending = "human_offer"
+            s.offer_reason = "dead_end"
             return self._directive(
                 s, t, "NO_CLAIMS",
-                goal="There are no claims on the caller's policy. Say so and offer a human representative for anything beyond that.",
+                goal="There are no claims on the caller's policy. Say so and ask whether they would like a human representative.",
                 fallback=(
                     f"{intro}I don't see any claims on file under this policy. If you were expecting one, or "
-                    f"want to start a new claim, I can connect you with a human representative. Is there "
-                    f"anything else I can help you with?"
+                    f"want to start a new claim, a human representative can help with that. Would you like me "
+                    f"to connect you?"
                 ),
                 facts={"claims_on_file": []},
-                cover=intro_cover + ["Say there are no claims on file.", "Offer a human representative, and ask if there is anything else."],
+                cover=intro_cover + ["Say there are no claims on file.", "Ask one question: whether they would like a human representative."],
             )
 
-        if not t.entered and u.done and not self._has_request(s, u, t):
+        if not t.entered and (u.done or t.declined_human) and not self._has_request(s, u, t):
             self.graph.move(s, POST_PROCESS, "the caller needs nothing else", t.trace)
             return None
 
+        # The caller was shown the claims on file and it is none of them (a new claim,
+        # another policy, something else). Listing them again would go round in circles.
+        picked = bool(u.selected_case_id or t.turn_hints)
+        if not t.entered and s.pending == "choose_case" and not picked:
+            s.unresolved_asks += 1
+            said_so = u.affirmation == "no" or bool(NOT_LISTED.search(t.text))
+            if not said_so and s.unresolved_asks >= 3:
+                # Three answers that pointed at nothing: the caller never said it is not on file.
+                s.unresolved_asks = 0
+                s.pending = "human_offer"
+                s.offer_reason = "unclear"
+                return self._directive(
+                    s, t, "CLAIM_UNCLEAR",
+                    goal="After several tries it is still unclear which claim the caller means. Say so without blaming them and ask whether they would like a human representative.",
+                    fallback=(
+                        "I'm sorry, I haven't been able to work out which claim you mean. A human representative "
+                        "can look at it with you. Would you like me to connect you?"
+                    ),
+                    facts={"claims_on_file": claims},
+                    cover=["Say you could not work out which claim they mean.", "Ask one question: whether they would like a human representative."],
+                )
+            if said_so:
+                s.unresolved_asks = 0
+                s.pending = "human_offer"
+                s.offer_reason = "dead_end"
+                return self._directive(
+                    s, t, "NOT_ON_FILE",
+                    goal="What the caller needs is not one of the claims on file. Say you can only help with those here, and ask whether they would like a human representative.",
+                    fallback=(
+                        "It sounds like what you need isn't one of the claims on file. From here I can only help "
+                        "with those, and I can't start a new claim. A human representative can do both. Would you "
+                        "like me to connect you?"
+                    ),
+                    facts={"claims_on_file": claims, "what_this_line_can_do": "Answer questions about the claims on file. It cannot open a new claim."},
+                    cover=[
+                        "Say you can only help with the claims on file here and cannot start a new claim.",
+                        "Ask one question: whether they would like a human representative.",
+                    ],
+                )
+        elif picked:
+            s.unresolved_asks = 0
+
         by_id = {c["claim_id"]: c for c in claims}
+        if t.exclude_case and all(c["claim_id"] == t.exclude_case for c in claims):
+            # "my other claim" when there is only one: say so and stay with it
+            m.case_hints = {"claim_id": t.exclude_case}
+            t.only_claim, t.same_case, t.exclude_case = True, True, ""
         if t.exclude_case:
             claims = [c for c in claims if c["claim_id"] != t.exclude_case]
         chosen: dict[str, Any] | None = None
@@ -130,6 +185,10 @@ class ResolveIntentPhase(PolicyBase):
                 else:
                     text = f"{intro}I see {len(candidates)} claims on this policy: {listing}. Which one can I help you with?"
                     goal = "The caller has not said which claim they mean. List the claims on file and ask."
+                    if s.unresolved_asks >= 2:
+                        # Their last answers did not point at a claim. Say how to choose, before offering a person.
+                        text += " You can give me the claim number, or tell me if it's none of these."
+                        goal += " Their earlier answers did not identify one, so say they can give the claim number or say it is none of these."
                 facts: dict[str, Any] = {"matching_claims": candidates}
                 if hints:
                     facts["caller_described"] = describe_hints(hints)

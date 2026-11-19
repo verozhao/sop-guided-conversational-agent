@@ -19,6 +19,7 @@ in the middle is the same either way.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -49,6 +50,7 @@ from .verification import PII_FIELDS, REQUIRED_MATCHES
 # deadline of 2026-03-18). The demo clock defaults to a date inside that
 # window so deadlines read sensibly. Set SOP_TODAY=real to use the system date.
 DEFAULT_DEMO_DATE = date(2026, 3, 5)
+MAX_INPUT_CHARS = 2000  # one caller message; the API rejects longer ones
 
 
 def clock_from_env() -> Callable[[], date]:
@@ -67,7 +69,7 @@ def clock_from_env() -> Callable[[], date]:
 @dataclass
 class AgentConfig:
     clock: Callable[[], date] | None = None
-    max_input_chars: int = 2000
+    max_input_chars: int = MAX_INPUT_CHARS
     max_traces: int = 60
 
 
@@ -108,6 +110,9 @@ class Agent:
             except LLMError as exc:
                 trace.llm_errors.append({"stage": "understand", "kind": exc.kind, "message": exc.message})
                 model_usable = not exc.fatal_for_turn
+            except Exception as exc:  # a model call may fail in any way: the turn still completes offline
+                trace.llm_errors.append({"stage": "understand", "kind": "unexpected", "message": type(exc).__name__})
+                model_usable = False
         if understanding is None:
             understanding = rule_understand(session, clean, self.data, today)
         trace.understanding = understanding.to_dict()
@@ -115,6 +120,10 @@ class Agent:
         # 2. decide (deterministic)
         directive = self.sop.step(session, understanding, trace, clean)
         trace.directive = directive.summary()
+        if session.verified:
+            # What a verified caller has been told stays grounded for the rest of the call.
+            session.grounded.append(json.dumps(directive.facts, ensure_ascii=False))
+            del session.grounded[:-20]
 
         # 3. word the reply, 4. guard it
         reply = directive.fallback
@@ -134,6 +143,8 @@ class Agent:
                     trace.reply_source = "template (the guard rejected the model reply)"
             except LLMError as exc:
                 trace.llm_errors.append({"stage": "respond", "kind": exc.kind, "message": exc.message})
+            except Exception as exc:  # the SOP step is already applied, so the template reply goes out
+                trace.llm_errors.append({"stage": "respond", "kind": "unexpected", "message": type(exc).__name__})
 
         used_model = understanding.source == "llm" or trace.reply_source == "model"
         trace.engine = getattr(llm, "name", "llm") if (llm is not None and used_model) else "offline"

@@ -6,8 +6,6 @@ fallback path when a model call fails.
 
 from __future__ import annotations
 
-from datetime import date
-
 import pytest
 
 from apps.insurance_claims import Agent
@@ -188,7 +186,3 @@ def test_a_request_no_path_covers_is_declined_with_an_offer_of_a_human(verified:
 def test_a_bare_why_repeats_the_reason(verified: Convo):
     reply = verified.say("why?")
     assert "It was denied because" in reply
-
-
-def test_dates_follow_the_demo_clock():
-    assert DEMO_DATE == date(2026, 3, 5)

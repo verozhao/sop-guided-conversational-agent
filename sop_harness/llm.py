@@ -44,15 +44,16 @@ MODELS_WITH_SERVER_FALLBACK = {
 class LLMError(Exception):
     """A model call failed. ``kind`` is stable and safe to show to a tester."""
 
-    def __init__(self, kind: str, message: str):
+    def __init__(self, kind: str, message: str, result: "LLMResult | None" = None):
         super().__init__(message)
         self.kind = kind
         self.message = message
+        self.result = result  # set when the API answered (and billed) before the call was judged a failure
 
     @property
     def fatal_for_turn(self) -> bool:
         """True when a second call in the same turn would fail the same way."""
-        return self.kind in {"auth", "permission", "model", "billing", "rate_limit", "connection"}
+        return self.kind in {"auth", "permission", "model", "billing", "rate_limit", "connection", "bad_request", "budget"}
 
 
 @dataclass
@@ -63,6 +64,7 @@ class LLMResult:
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     def usage(self, purpose: str) -> dict[str, Any]:
         return {
@@ -71,6 +73,7 @@ class LLMResult:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
         }
 
 
@@ -126,9 +129,9 @@ class AnthropicLLM:
         try:
             data = json.loads(result.text)
         except json.JSONDecodeError as exc:
-            raise LLMError("bad_output", "The model did not return valid JSON.") from exc
+            raise LLMError("bad_output", "The model did not return valid JSON.", result) from exc
         if not isinstance(data, dict):
-            raise LLMError("bad_output", "The model returned JSON that is not an object.")
+            raise LLMError("bad_output", "The model returned JSON that is not an object.", result)
         result.data = data
         return result
 
@@ -156,21 +159,29 @@ class AnthropicLLM:
 
         response = self._send(kwargs)
 
-        if response.stop_reason == "refusal":
-            raise LLMError("refusal", "The model declined this request.")
-        if response.stop_reason == "max_tokens":
-            raise LLMError("truncated", "The model reply was cut off by max_tokens.")
-        text = "".join(block.text for block in response.content if block.type == "text").strip()
-        if not text:
-            raise LLMError("empty", "The model returned no text.")
-        usage = response.usage
-        return LLMResult(
+        try:
+            stop_reason = response.stop_reason
+            text = "".join(block.text for block in response.content if block.type == "text").strip()
+            usage = response.usage
+        except (AttributeError, TypeError) as exc:
+            # A gateway in front of the API answered 200 with something that is not a message.
+            raise LLMError("bad_output", "The model endpoint returned a response that is not a message.") from exc
+        result = LLMResult(
             text=text,
             model=getattr(response, "model", self.model) or self.model,
             input_tokens=getattr(usage, "input_tokens", 0) or 0,
             output_tokens=getattr(usage, "output_tokens", 0) or 0,
             cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+            cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
         )
+        # These calls were answered and billed, so the usage travels with the error.
+        if stop_reason == "refusal":
+            raise LLMError("refusal", "The model declined this request.", result)
+        if stop_reason == "max_tokens":
+            raise LLMError("truncated", "The model reply was cut off by max_tokens.", result)
+        if not text:
+            raise LLMError("empty", "The model returned no text.", result)
+        return result
 
     def _send(self, kwargs: dict[str, Any]) -> Any:
         sdk = self._sdk
@@ -181,8 +192,11 @@ class AnthropicLLM:
                         betas=[FALLBACK_BETA], fallbacks="default", **kwargs
                     )
                 except sdk.BadRequestError as exc:
-                    # The fallback beta may not be enabled for this account.
-                    # Degrade to a plain request instead of failing the turn.
+                    # Only when the fallback option itself was rejected (the beta is not
+                    # enabled for this account): send a plain request instead. Any other
+                    # 400 would fail the same way again, so it is raised as it is.
+                    if not any(word in _short(exc).lower() for word in ("beta", "fallback")):
+                        raise
                     self._fallbacks_on = False
                     self.fallback_note = _short(exc)
             return self.client.messages.create(**kwargs)
@@ -201,6 +215,10 @@ class AnthropicLLM:
             raise LLMError(kind, f"Model API error {exc.status_code}: {_short(exc)}") from exc
         except sdk.APIConnectionError as exc:
             raise LLMError("connection", "Could not reach the model API (network or timeout).") from exc
+        except LLMError:
+            raise
+        except Exception as exc:  # anything else from the client is still only a failed model call
+            raise LLMError("api", f"Unexpected error from the model client: {type(exc).__name__}") from exc
 
 
 def _short(exc: Exception) -> str:

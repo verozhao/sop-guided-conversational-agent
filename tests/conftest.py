@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import date
+import os
 
-import pytest
+# Set before anything imports the server: no .env file is read during tests.
+os.environ["SOP_SKIP_DOTENV"] = "1"
+
+from datetime import date  # noqa: E402
+
+import pytest  # noqa: E402
 
 from apps.insurance_claims import Agent, AgentConfig
 
@@ -62,6 +67,13 @@ def assert_no_leak(reply: str, allow: tuple[str, ...] = ()) -> None:
     low = reply.lower()
     leaked = [item for item in PROTECTED if item not in allow and item.lower() in low]
     assert not leaked, f"protected data in reply: {leaked}\n{reply}"
+
+
+@pytest.fixture(autouse=True)
+def _no_real_token(monkeypatch):
+    """No test may see an API token or a setting from the developer's shell."""
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "SOP_MODEL", "SOP_EFFORT", "SOP_TODAY", "SOP_INSPECTOR"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

@@ -35,16 +35,26 @@ def test_accepting_the_offer_transfers_and_declining_resumes(convo: Convo):
     assert convo.act == "OOS_OFFER_HUMAN"
     convo.say("no, let's continue. My name is Margaret Chen")
     assert convo.s.phase == VERIFY_ID
-    assert convo.s.oos_streak == 0
+    assert convo.s.oos_streak == 2  # one relevant message takes one off the count
     assert convo.s.verification["matched"] == ["full_name"]
 
 
-def test_an_in_scope_turn_resets_the_streak(convo: Convo):
+def test_a_relevant_message_in_between_does_not_wipe_the_count(convo: Convo):
     convo.run("What is RL?", "tell me a joke")
     convo.say("ok. my name is Margaret Chen")
-    convo.run("who won the football game?", "what's bitcoin at?")
-    assert convo.s.oos_streak == 2
+    assert convo.s.oos_streak == 1
+    convo.say("who won the football game?")
+    assert convo.act == "OOS_DECLINE" and convo.s.oos_streak == 2
+    convo.say("what's bitcoin at?")
+    assert convo.act == "OOS_OFFER_HUMAN"  # four unrelated questions out of five messages
     assert convo.s.phase == VERIFY_ID
+
+
+def test_enough_relevant_messages_clear_the_count(verified: Convo):
+    verified.say("write me a poem")
+    assert verified.s.oos_streak == 1
+    verified.say("how much will I be reimbursed?")
+    assert verified.s.oos_streak == 0
 
 
 def test_out_of_scope_after_verification_keeps_the_place(verified: Convo):

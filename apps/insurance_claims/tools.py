@@ -15,7 +15,14 @@ from sop_harness.core import ToolDenied, ToolRegistry
 
 from .data import ClaimsData
 from .email_summary import compose_summary
-from .normalize import join_items, mask_email
+from .guidance import (
+    document_guidance,
+    human_review_note,
+    if_unavailable,
+    render_followup,
+    text,
+)
+from .normalize import mask_email
 from .state import (
     CLOSED,
     POST_PROCESS,
@@ -33,22 +40,11 @@ def build_tools(data: ClaimsData, clock: Callable[[], date]) -> ToolRegistry:
     registry = ToolRegistry()
     guide = data.guidelines
 
-    def text(node: Any) -> str:
-        return node.get("en", "") if isinstance(node, dict) else ""
-
     def own_claim(session: Session, case_id: str) -> dict[str, Any]:
         claim = data.claim_for_party(session.party_id, case_id)
         if claim is None:
             raise ToolDenied("claim is not on the verified caller's policy")
         return claim
-
-    def doc_guidance(table: str, document: str) -> str:
-        rows = guide.get(table, {})
-        wanted = document.lower()
-        for key, node in rows.items():
-            if key != "default" and (wanted in key.lower() or key.lower() in wanted):
-                return text(node)
-        return ""
 
     # -- consent (representative callers) ------------------------------------
 
@@ -68,7 +64,7 @@ def build_tools(data: ClaimsData, clock: Callable[[], date]) -> ToolRegistry:
     def request_consent(session: Session) -> dict[str, Any]:
         if not session.identity_ok:
             raise ToolDenied("consent can only be requested after the policyholder's details match")
-        return {"status": step_consent(session, 0), "sent_to": "the phone number on file for the policyholder"}
+        return {"status": step_consent(session, 0), "sent_to": "the policyholder"}
 
     def check_consent_status(session: Session) -> dict[str, Any]:
         if session.consent.get("status") is None:
@@ -109,6 +105,10 @@ def build_tools(data: ClaimsData, clock: Callable[[], date]) -> ToolRegistry:
         if deadline:
             days = (date.fromisoformat(deadline) - today).days
             out["appeal_deadline"] = deadline
+            out["appeal_deadline_means"] = (
+                "The last day to appeal the denial. It is not stated as a due date for documents. "
+                "Document timing, when given, comes from the follow-up guidance."
+            )
             out["deadline_passed"] = days < 0
             if days >= 0:
                 out["days_until_deadline"] = days
@@ -133,9 +133,8 @@ def build_tools(data: ClaimsData, clock: Callable[[], date]) -> ToolRegistry:
             "documents": [
                 {
                     "name": document,
-                    "requirements": doc_guidance("document_guidance", document),
-                    "if_unavailable": doc_guidance("document_alternative_guidance", document)
-                    or text(guide.get("document_alternative_guidance", {}).get("default")),
+                    "requirements": document_guidance(guide, "document_guidance", document),
+                    "if_unavailable": if_unavailable(guide, document),
                 }
                 for document in needed
             ],
@@ -150,21 +149,9 @@ def build_tools(data: ClaimsData, clock: Callable[[], date]) -> ToolRegistry:
                 "guidance": [],
                 "note": "No documents are requested for this claim, so document follow-up guidance does not apply.",
             }
-        settings = guide.get("claim_followup_settings", {})
-        values = {
-            "case_id": claim["case_id"],
-            "documents": "the " + join_items(needed),
-            "average_processing_time_after_submission": text(settings.get("average_processing_time_after_submission")),
-        }
-        rows = {row["topic"]: row for row in guide.get("claim_followup_guidance", [])}
-        guidance = [
-            {"topic": topic, "text": text(rows[topic]).format(**values)}
-            for topic in dict.fromkeys(topics)
-            if topic in rows
-        ]
-        out: dict[str, Any] = {"claim_id": claim["case_id"], "guidance": guidance}
+        out: dict[str, Any] = {"claim_id": claim["case_id"], "guidance": render_followup(guide, claim, topics)}
         if "missing_required_material_alternatives" in topics:
-            out["if_no_alternative_exists"] = text(settings.get("human_review_after_document_alternatives_exhausted"))
+            out["if_no_alternative_exists"] = human_review_note(guide)
         out["if_the_question_is_not_covered_above"] = text(guide.get("claim_followup_fallback"))
         return out
 
@@ -187,7 +174,7 @@ def build_tools(data: ClaimsData, clock: Callable[[], date]) -> ToolRegistry:
         message = compose_summary(session, data, clock())
         session.outbox.append(message)
         session.email["new_since"] = False
-        return {"sent": True, "to": message["to_masked"], "subject": message["subject"]}
+        return {"sent": True, "to": message["to_masked"], "subject": message["subject"], "contains": message["sections"]}
 
     def transfer_to_human(session: Session, reason: str) -> dict[str, Any]:
         memory = session.memory

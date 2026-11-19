@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +14,7 @@ from apps.insurance_claims.understanding import (
 )
 from sop_harness.llm import FALLBACK_BETA, AnthropicLLM, LLMError, ScriptedLLM
 
-from .conftest import PROTECTED, Convo
+from .conftest import DEMO_UTTERANCE, PROTECTED, Convo
 
 
 def reading(**overrides) -> dict:
@@ -30,6 +29,7 @@ def reading(**overrides) -> dict:
         "declined_fields": [],
         "refuses_verification": False,
         "intent": "none",
+        "also_asks": [],
         "case_hints": {"claim_id": "", "claim_type": "none", "status": "none", "month": 0, "year": 0},
         "selected_case_id": "",
         "question": "",
@@ -40,6 +40,7 @@ def reading(**overrides) -> dict:
         "affirmation": "none",
         "email_summary_choice": "none",
         "done": False,
+        "more": False,
         "notes": [],
     }
     identity = overrides.pop("identity", {})
@@ -248,11 +249,11 @@ def _client(plain, beta):
     return SimpleNamespace(messages=plain, beta=SimpleNamespace(messages=beta))
 
 
-def _status_error(cls, status: int):
+def _status_error(cls, status: int, message: str = "simulated"):
     import httpx2
 
     request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-    return cls("simulated", response=httpx2.Response(status, request=request), body=None)
+    return cls(message, response=httpx2.Response(status, request=request), body=None)
 
 
 def test_request_uses_structured_output_effort_and_fallbacks():
@@ -275,12 +276,25 @@ def test_fallback_beta_rejection_degrades_to_a_plain_request():
     import anthropic
 
     plain = _Endpoint(_response("hello"))
-    beta = _Endpoint(_status_error(anthropic.BadRequestError, 400))
+    rejected = "Unexpected value(s) `server-side-fallback-2026-07-01` for the `anthropic-beta` header."
+    beta = _Endpoint(_status_error(anthropic.BadRequestError, 400, rejected))
     llm = AnthropicLLM(api_key="test-key", client=_client(plain, beta))
     assert llm.complete_text(system="s", user="u").text == "hello"
     assert "fallbacks" not in plain.calls[0] and "betas" not in plain.calls[0]
     llm.complete_text(system="s", user="u")
     assert len(beta.calls) == 1 and len(plain.calls) == 2  # the beta is not retried
+
+
+def test_an_unrelated_400_is_not_retried_and_stops_the_turn():
+    import anthropic
+
+    plain = _Endpoint(_response("hello"))
+    beta = _Endpoint(_status_error(anthropic.BadRequestError, 400, "your organization must have data retention enabled"))
+    llm = AnthropicLLM(api_key="test-key", client=_client(plain, beta))
+    with pytest.raises(LLMError) as caught:
+        llm.complete_text(system="s", user="u")
+    assert caught.value.kind == "bad_request" and caught.value.fatal_for_turn
+    assert not plain.calls and len(beta.calls) == 1  # one request, not three
 
 
 def test_models_without_server_fallback_use_the_plain_endpoint():
@@ -321,5 +335,18 @@ def test_invalid_json_from_the_model_is_an_error():
     llm = AnthropicLLM(api_key="k", model="claude-haiku-5-5", client=_client(endpoint, endpoint))
     with pytest.raises(LLMError) as caught:
         llm.complete_json(system="s", user="u", schema={"type": "object"})
-    assert caught.value.kind == "bad_output"
-    assert json.loads("{}") == {}
+    assert caught.value.kind == "bad_output" and not caught.value.fatal_for_turn
+
+
+def test_a_models_no_to_the_email_offer_is_honoured(agent: Agent):
+    c = Convo(agent)
+    c.run(DEMO_UTTERANCE, "No, that's all.")
+    for answer in (reading(affirmation="no"), reading(email_summary_choice="skip")):
+        other = Convo(agent)
+        other.run(DEMO_UTTERANCE, "No, that's all.")
+        other.llm = scripted([answer], ["No problem, I won't send it. Take care."])
+        other.say("I'd rather you didn't, thanks")
+        assert other.act == "EMAIL_SKIPPED" and not other.s.outbox and "send_email_summary" not in other.tools
+    c.llm = scripted([reading()], ["Would you like me to send it, or skip it?"])
+    c.say("hmm, let me think")
+    assert c.act == "EMAIL_OFFER_REPEAT" and not c.s.outbox  # no reading of yes means nothing is sent

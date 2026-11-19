@@ -8,10 +8,12 @@ remembered: "send" is confirmed before sending, "skip" is honoured directly.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sop_harness.core import Directive
 
+from ..email_summary import summary_sections
 from ..state import CLOSED, POST_PROCESS, PROCESS_CASE, RESOLVE_INTENT, Session
 from ..tools import email_target
 from ..understanding import Understanding
@@ -19,6 +21,14 @@ from .common import (
     MAX_EMAIL_REASKS,
     PolicyBase,
     TurnCtx,
+)
+
+EMAIL_IN_TEXT = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+SUMMARY_AGAIN = re.compile(r"\bre-?send\b|\bsend\s+(?:it|that|the\s+summary)\b|\bsummary\b|\brecap\b|\be-?mail\b", re.I)
+OTHER_ADDRESS = re.compile(
+    r"\b(?:different|another|other|new|work|personal)\s+(?:e-?mail|address|one)\b|"
+    r"\bnot\s+(?:to\s+)?that\s+(?:address|e-?mail|one)\b|\bsomewhere\s+else\b",
+    re.I,
 )
 
 
@@ -65,7 +75,14 @@ class PostProcessPhase(PolicyBase):
             }
         }
 
+        preview = summary_sections(s, self.data, self.clock())
+        offer_facts["email_summary"]["would_contain"] = {
+            "what_we_discussed": preview["what_we_discussed"],
+            "follow_up_items_and_next_steps": preview["follow_up_items_and_next_steps"],
+        }
+
         if t.entered:
+            s.email["reasks"] = 0
             if s.email["decision"] is not None and not s.email["new_since"]:
                 return self._close(s, t, "CLOSING", lead="")
             if m.email_pref == "skip" and s.email["decision"] is None:
@@ -96,22 +113,36 @@ class PostProcessPhase(PolicyBase):
                 s, t, "EMAIL_OFFER",
                 goal="The claim questions are done. Offer the email summary and let the customer choose to send or skip it.",
                 fallback=(
-                    f"Before we wrap up, would you like me to email you {again} of today's conversation? It "
-                    f"covers what we discussed, the claim status and the next steps, and it would go to "
-                    f"{target}. I can send it or we can skip it, whichever you prefer."
+                    f"Before we wrap up, would you like me to email {'' if self._is_rep(s) else 'you '}{again} of "
+                    f"today's conversation? It covers what we discussed, the claim status and the next steps, and "
+                    f"it would go to {target}. I can send it or we can skip it, whichever you prefer."
                 ),
                 facts=offer_facts,
                 cover=["Offer the email summary.", "Say what it contains and where it would go.", "Make clear they can choose to send it or skip it."],
                 must_not=["Do not send or claim to have sent anything yet."],
             )
 
+        if u.more and u.email_summary_choice == "none":
+            # "wait, I have another question": back to the claim, the offer comes again later.
+            back = PROCESS_CASE if s.case_id else RESOLVE_INTENT
+            self.graph.move(s, back, "the caller has another question", t.trace)
+            s.pending = "anything_else" if s.case_id else "open"
+            return self._directive(
+                s, t, "ASK_WHAT_ELSE",
+                goal="The caller has another question but has not asked it yet. Invite it.",
+                fallback="Of course. What else would you like to know?",
+                facts={"claim_in_focus": s.case_id},
+            )
+
         choice = u.email_summary_choice
-        if choice == "none" and s.pending == "email_offer" and u.affirmation != "none":
+        if choice == "none" and s.pending == "email_offer" and u.affirmation != "none" and not u.process_question:
             choice = "send" if u.affirmation == "yes" else "skip"
         party = self.data.party(s.party_id)
-        other_address = u.identity.get("email", "")
+        typed = EMAIL_IN_TEXT.search(t.text)
+        other_address = u.identity.get("email", "") or (typed.group(0).lower() if typed else "")
         on_file = {party.email.lower(), *(a.lower() for a in party.email_aliases)} if party else set()
-        if other_address and other_address.lower() not in on_file and choice != "skip":
+        elsewhere = bool(other_address and other_address.lower() not in on_file) or bool(OTHER_ADDRESS.search(t.text))
+        if elsewhere and choice != "skip":
             s.pending = "email_offer"
             return self._directive(
                 s, t, "EMAIL_ADDRESS_FIXED",
@@ -129,7 +160,11 @@ class PostProcessPhase(PolicyBase):
                 ],
                 must_not=["Do not send or claim to have sent anything yet.", "Do not repeat the address the caller gave."],
             )
-        if choice == "none" and self._has_request(s, u, t):
+        claim_request = u.intent != "none" or bool(u.followup_topics) or self._is_switch(s, u, t)
+        if claim_request or (choice == "none" and bool(u.question) and not u.process_question):
+            if choice != "none":
+                m.email_pref = choice
+                m.remember("email_pref", s.turn, s.phase)
             self._route_request(s, u, t, POST_PROCESS)
             return None
         if choice == "send":
@@ -139,7 +174,10 @@ class PostProcessPhase(PolicyBase):
                 s, t, "EMAIL_SENT",
                 lead=f"Done. I've sent the summary to {target}.",
                 facts={"email_sent": out},
-                cover=[f"Confirm the summary was sent to {target}."],
+                cover=[
+                    f"Confirm the summary was sent to {target}.",
+                    "If you say what it contains, stay within facts.email_sent.contains.",
+                ],
             )
         if choice == "skip":
             s.email["decision"] = "skip"
@@ -150,7 +188,8 @@ class PostProcessPhase(PolicyBase):
                 cover=["Confirm that no email will be sent."],
             )
 
-        s.email["reasks"] += 1
+        if not u.process_question:
+            s.email["reasks"] += 1  # answering a question about the summary is not an unclear answer
         if s.email["reasks"] > MAX_EMAIL_REASKS:
             s.email["decision"] = "skip"
             return self._close(
@@ -182,12 +221,41 @@ class PostProcessPhase(PolicyBase):
                 facts={"email_sent": out},
                 cover=[f"Confirm the summary was sent to {target}."],
             )
+        if s.outbox and SUMMARY_AGAIN.search(t.text) and u.intent == "none":
+            return self._directive(
+                s, t, "EMAIL_ALREADY_SENT",
+                goal="The summary was already sent. Say so, and say a human representative can help if it has not arrived.",
+                fallback=(
+                    f"The summary has already gone to {target}. If it hasn't arrived, a human representative can "
+                    f"look into it. Just ask and I'll connect you."
+                ),
+                facts={"email_sent": s.outbox[-1]},
+                cover=["Say the summary was already sent, and where.", "Say a human representative can help if it has not arrived."],
+            )
         if s.verified and self._has_request(s, u, t):
             self._route_request(s, u, t, CLOSED)
             return None
+        if u.more and s.verified:
+            return self._directive(
+                s, t, "CLOSED_MORE",
+                goal="The conversation was wrapped up and the caller has another question. Invite it.",
+                fallback="Of course. What would you like to know?",
+                fixed=True,
+            )
+        if u.emotion != "neutral" or u.process_question:
+            s.pending = "human_offer"
+            s.offer_reason = "concern"
+            return self._directive(
+                s, t, "CLOSED_CONCERN",
+                goal="The conversation was wrapped up, and the caller has come back unhappy or with a concern. Acknowledge it and ask whether they would like a human representative.",
+                fallback="If you'd like to take this further, I can connect you with a human representative. Would you like me to do that?",
+                cover=["Acknowledge what the caller said.", "Ask one question: whether they would like a human representative."],
+            )
+        t.empathy = ""
         return self._directive(
             s, t, "CLOSED_ACK",
             goal="The conversation is finished.",
-            fallback="You're welcome. Take care!",
+            fallback="You're welcome. Take care!" if u.done or u.affirmation != "none" or not t.text.strip().endswith("?")
+            else "This conversation has been wrapped up. If you have another question about a claim, just ask.",
             fixed=True,
         )

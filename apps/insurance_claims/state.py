@@ -30,8 +30,11 @@ class Memory:
     identity: dict[str, str] = field(default_factory=dict)
     declined: list[str] = field(default_factory=list)
     caller_role: str = "unknown"
+    role_guessed: bool = False         # the role was inferred from wording, not stated
+    role_unclear: bool = False         # somebody else was mentioned and the caller has not said who they are
     representative_name: str = ""
     intent: str = "none"
+    extra_intents: list[str] = field(default_factory=list)
     intent_consumed: bool = False
     case_hints: dict[str, Any] = field(default_factory=dict)
     hints_consumed: bool = False
@@ -58,7 +61,11 @@ class Session:
     identity_ok: bool = False
     party_id: str | None = None
     verification: dict[str, Any] = field(default_factory=dict)
+    candidate_id: str | None = None    # the record the caller's details have been matching so far
     failed_attempts: int = 0
+    name_misses: int = 0
+    rep_name_refused: str = ""         # a representative name that was not on the policy
+    role_checks: int = 0               # times "are you the policyholder yourself?" was asked
     refusal_count: int = 0
     rep_denials: int = 0
     consent: dict[str, Any] = field(
@@ -67,16 +74,19 @@ class Session:
 
     # conversation control
     pending: str = "identity"
-    human_offer_open: bool = False
+    offer_reason: str = ""             # why a human was last offered: "dead_end" when nothing else can be done here
     oos_streak: int = 0
     oos_total: int = 0
     distress_streak: int = 0
     distress_offer_made: bool = False
     last_empathy: str = ""
+    mixed_note_turn: int = -10
+    answers_given: int = 0
 
     # case handling
     case_id: str | None = None
     last_candidates: list[str] = field(default_factory=list)
+    unresolved_asks: int = 0
     last_intent: str = "none"
     discussed: list[dict[str, Any]] = field(default_factory=list)
 
@@ -85,6 +95,8 @@ class Session:
     outbox: list[dict[str, Any]] = field(default_factory=list)
     handoff: dict[str, Any] | None = None
 
+    # facts already given to this verified caller in earlier turns (for the output guard)
+    grounded: list[str] = field(default_factory=list)
     history: list[dict[str, Any]] = field(default_factory=list)
     traces: list[dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
