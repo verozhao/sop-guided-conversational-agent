@@ -89,6 +89,7 @@ class Understanding:
     notes: list[str] = field(default_factory=list)
     guessed: list[str] = field(default_factory=list)  # what the offline rules only inferred (a name, the caller's role)
     partial: list[str] = field(default_factory=list)  # identity details given incompletely ("March 15", a bare year)
+    mentions_other: bool = False       # a relative or "for her" came up while the caller's role is unknown
     source: str = "rules"
 
     def to_dict(self) -> dict[str, Any]:

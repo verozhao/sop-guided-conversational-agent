@@ -157,7 +157,11 @@ def test_a_third_party_with_three_correct_details_is_not_verified_as_the_policyh
     ],
 )
 def test_a_policyholder_who_mentions_a_relative_is_still_the_policyholder(convo: Convo, text: str):
-    convo.say(text)
+    reply = convo.say(text)
+    if convo.act == "ROLE_CHECK":  # a relative came up and the caller had not said who is calling
+        assert not convo.s.verified and "policyholder yourself" in reply
+        assert_no_leak(reply)
+        convo.say("yes, that's me")
     assert convo.s.verified and convo.s.memory.caller_role != "representative"
 
 

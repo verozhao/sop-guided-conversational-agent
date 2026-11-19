@@ -153,6 +153,14 @@ SELF_REP_RE = re.compile(
     rf"\bthis\s+is\s+(?:actually\s+)?(?:her|his|their)\s+{_ROLES}\b|\bnot\s+my\s+(?:own\s+)?(?:policy|claim)\b",
     _I,
 )
+# Somebody else comes up, but the message does not say who is calling. The policy then asks.
+MENTIONS_OTHER_RE = re.compile(
+    rf"\b(?:{_RELATIVES})\b|\b(?:she|he)\s+(?:asked|wants|wanted|needs|can't|cannot|is\s+the|told\s+me)\b|"
+    r"\bfor\s+(?:her|him|them)\b|\basked\s+me\s+to\s+call\b",
+    _I,
+)
+ITS_ME_RE = re.compile(r"\b(?:that's|it's|this\s+is|that\s+is|it\s+is)\s+me\b|\bmyself\b|\bmy\s+own\b|\bi\s+am\b|\bspeaking\b|\bthe\s+policy\s?holder\b", _I)
+NOT_ME_RE = re.compile(r"\bnot\s+me\b|\bsomeone\s+else\b|\bfor\s+(?:her|him|them|someone)\b|\bon\s+(?:her|his|their)\s+behalf\b", _I)
 POLICYHOLDER_RE = re.compile(
     r"\bi(?:'m|\s+am)\s+the\s+(?:policy\s?holder|insured|member|account\s+holder)(?!'s)\b|"
     r"\b(?:it(?:'s|\s+is)|this\s+is)\s+my\s+(?:own\s+)?policy\b|\bmy\s+own\s+(?:policy|claim)\b",
@@ -410,7 +418,8 @@ HUMAN_RE = re.compile(
 # A negation cancels the request only when it governs the transfer or the person:
 # "don't transfer me", "I'd rather not talk to a person". "I don't want a bot" cancels nothing.
 HUMAN_NEG_RE = re.compile(
-    rf"\b(?:don't|do\s+not|dont|not|never|no\s+need(?:\s+to)?|rather\s+not|without|won't)\s+(?:\w+\s+){{0,3}}?"
+    rf"\b(?:don't|do\s+not|dont|not|never|no\s+need(?:\s+to)?|rather\s+not|without|won't)\s+"
+    rf"(?:(?:want|wanna|need|have|to|be|you|just|really|please|even|ever|get|going|like)\s+){{0,3}}?"
     rf"(?:transfer|connect|escalat\w+|put\s+me|(?:talk|speak|chat)\w*\s+(?:to|with)\s+(?:(?:a|an|the|your)\s+)?"
     rf"(?:real\s+|live\s+|actual\s+)?(?:{_PERSON}|someone|somebody)|(?:want|need)\s+(?:(?:a|an)\s+)?{_PERSON})\b",
     _I,
@@ -748,6 +757,14 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
     elif REP_WEAK_RE.search(text) and (memory.caller_role == "representative" or not session.verification.get("matched")):
         u.caller_role = "representative"
         u.guessed.append("caller_role")  # inferred from how they talk, never said outright
+    if not session.verified and u.caller_role == "unknown":
+        if pending == "role_check":  # the agent has just asked "are you the policyholder yourself?"
+            if NOT_ME_RE.search(text):
+                u.caller_role = "representative"
+            elif ITS_ME_RE.search(text):
+                u.caller_role = "policyholder"
+        elif MENTIONS_OTHER_RE.search(text):
+            u.mentions_other = True
     is_rep = u.caller_role == "representative" or (u.caller_role == "unknown" and memory.caller_role == "representative")
 
     # ---- structured identity values, masking each as it is found -------------
@@ -911,7 +928,7 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
         elif "document_requirements" not in matched:
             matched.append("document_requirements")
     # "send it" at the email offer is about the email, not about documents
-    summary_open = pending == "email_offer" or (phase == CLOSED and not session.outbox)
+    summary_open = pending == "email_offer" or phase == CLOSED
     if "document_requirements" in matched and (summary_open or re.search(r"\be-?mails?\b|\bsummary\b|\brecap\b", low)):
         if not re.search(INTENT_RULES[2][1], EMAILISH_RE.sub(" ", low)):
             matched.remove("document_requirements")

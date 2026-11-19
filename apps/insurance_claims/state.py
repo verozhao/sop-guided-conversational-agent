@@ -31,6 +31,7 @@ class Memory:
     declined: list[str] = field(default_factory=list)
     caller_role: str = "unknown"
     role_guessed: bool = False         # the role was inferred from wording, not stated
+    role_unclear: bool = False         # somebody else was mentioned and the caller has not said who they are
     representative_name: str = ""
     intent: str = "none"
     extra_intents: list[str] = field(default_factory=list)
@@ -64,6 +65,7 @@ class Session:
     failed_attempts: int = 0
     name_misses: int = 0
     rep_name_refused: str = ""         # a representative name that was not on the policy
+    role_checks: int = 0               # times "are you the policyholder yourself?" was asked
     refusal_count: int = 0
     rep_denials: int = 0
     consent: dict[str, Any] = field(

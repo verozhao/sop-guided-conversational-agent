@@ -188,6 +188,10 @@ class InsuranceSOP(VerifyIdPhase, ResolveIntentPhase, ProcessCasePhase, PostProc
                     captured.append(f"declined.{name}")
                 if name in m.identity and name not in u.identity and name not in already_matched:
                     del m.identity[name]  # the caller withdrew a value given earlier
+            if u.mentions_other and m.caller_role == "unknown":
+                m.role_unclear = True
+            if u.caller_role != "unknown":
+                m.role_unclear = False
             if u.caller_role != "unknown" and u.caller_role != m.caller_role:
                 inferred = "caller_role" in u.guessed
                 if m.caller_role == "representative" and not m.role_guessed:

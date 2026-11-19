@@ -20,6 +20,7 @@ PENDING_LABELS = {
     "identity": "identity details (any three of: full name, date of birth, phone, email, last four of SSN or national ID)",
     "rep_name": "the caller's own full name (they are calling for someone else)",
     "consent": "to say when the policyholder has approved the consent request",
+    "role_check": "whether the caller is the policyholder themselves (yes) or is calling for them (no)",
     "choose_case": "which claim the caller means",
     "open": "how the agent can help",
     "anything_else": "whether there is anything else the caller wants to know",

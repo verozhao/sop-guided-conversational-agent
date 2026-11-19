@@ -24,6 +24,7 @@ from .common import (
 )
 
 EMAIL_IN_TEXT = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+SUMMARY_AGAIN = re.compile(r"\bre-?send\b|\bsend\s+(?:it|that|the\s+summary)\b|\bsummary\b|\brecap\b|\be-?mail\b", re.I)
 OTHER_ADDRESS = re.compile(
     r"\b(?:different|another|other|new|work|personal)\s+(?:e-?mail|address|one)\b|"
     r"\bnot\s+(?:to\s+)?that\s+(?:address|e-?mail|one)\b|\bsomewhere\s+else\b",
@@ -219,6 +220,17 @@ class PostProcessPhase(PolicyBase):
                 fallback=f"Sure. I've sent the summary to {target}. Take care.",
                 facts={"email_sent": out},
                 cover=[f"Confirm the summary was sent to {target}."],
+            )
+        if s.outbox and SUMMARY_AGAIN.search(t.text) and u.intent == "none":
+            return self._directive(
+                s, t, "EMAIL_ALREADY_SENT",
+                goal="The summary was already sent. Say so, and say a human representative can help if it has not arrived.",
+                fallback=(
+                    f"The summary has already gone to {target}. If it hasn't arrived, a human representative can "
+                    f"look into it. Just ask and I'll connect you."
+                ),
+                facts={"email_sent": s.outbox[-1]},
+                cover=["Say the summary was already sent, and where.", "Say a human representative can help if it has not arrived."],
             )
         if s.verified and self._has_request(s, u, t):
             self._route_request(s, u, t, CLOSED)

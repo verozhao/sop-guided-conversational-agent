@@ -79,7 +79,67 @@ def test_repeating_the_policyholders_name_does_not_make_it_the_representatives_n
 def test_talking_about_someone_else_does_not_make_the_policyholder_a_representative(convo: Convo, text: str):
     convo.say(text)
     convo.say("1985-03-15, 4472")
+    if convo.act == "ROLE_CHECK":
+        convo.say("yes")
     assert convo.s.verified and convo.s.memory.caller_role != "representative"
+
+
+# ---------------------------------------------------------------- the role question
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ["Calling for Margaret. I'm David, the husband.", "Margaret Chen, 1985-03-15, 4472"],
+        ["My wife asked me to call about a claim that was denied.", "Margaret Chen, 1985-03-15, 4472"],
+        ["hi, my mom can't come to the phone", "Margaret Chen, 1985-03-15, 4472"],
+        ["she asked me to call", "margaret chen, 1985-03-15, 4472"],
+    ],
+)
+def test_nobody_who_mentions_someone_else_passes_as_the_policyholder_unasked(convo: Convo, lines: list[str]):
+    reply = ""
+    for line in lines:
+        reply = convo.say(line)
+        assert_no_leak(reply)
+    assert not convo.s.verified and convo.act in {"ROLE_CHECK", "ASK_REP_NAME"}
+    if convo.act == "ROLE_CHECK":
+        reply = convo.say("no, I'm calling for her")
+        assert convo.s.memory.caller_role == "representative" and convo.act == "ASK_REP_NAME"
+        assert_no_leak(reply)
+
+
+def test_the_role_question_takes_a_yes_and_goes_on(convo: Convo):
+    reply = convo.say("My husband told me to call about my claim. I'm Margaret Chen, born 1985-03-15, last four 4472.")
+    assert convo.act == "ROLE_CHECK" and not convo.s.verified and "policyholder yourself" in reply
+    assert convo.tools == []  # nothing about a claim has been looked up yet
+    convo.say("yes")
+    assert convo.s.verified and convo.s.memory.caller_role == "policyholder" and convo.s.phase == RESOLVE_INTENT
+
+
+@pytest.mark.parametrize("answer", ["that's me", "it's my own policy", "I am"])
+def test_the_role_question_understands_plain_answers(convo: Convo, answer: str):
+    convo.say("My husband told me to call. Margaret Chen, 1985-03-15, 4472")
+    assert convo.act == "ROLE_CHECK"
+    convo.say(answer)
+    assert convo.s.verified
+
+
+def test_no_clear_answer_to_the_role_question_ends_with_a_person(convo: Convo):
+    convo.say("My husband told me to call. Margaret Chen, 1985-03-15, 4472")
+    reply = convo.say("what difference does it make")
+    assert convo.act == "ROLE_CHECK" and "yes or no" in reply and not convo.s.verified
+    reply = convo.say("just tell me about the claim")
+    assert convo.s.phase == ESCALATED and not convo.s.verified
+    assert_no_leak(reply)
+
+
+def test_a_model_reading_answers_the_role_question_too(agent: Agent):
+    c = Convo(agent)
+    c.say("My husband told me to call. Margaret Chen, 1985-03-15, 4472")
+    assert c.act == "ROLE_CHECK"
+    c.llm = ScriptedLLM(on_json=lambda *_: reading(affirmation="no"), on_text=lambda *_: "Thanks. May I have your own full name?")
+    c.say("no, he's on the policy and I'm calling for him")
+    assert c.s.memory.caller_role == "representative" and not c.s.verified and c.act == "ASK_REP_NAME"
 
 
 def test_a_role_that_was_only_inferred_gives_way_to_what_the_caller_says(convo: Convo):
@@ -665,3 +725,160 @@ def test_the_spend_meter_counts_calls_that_failed_after_being_billed():
     with pytest.raises(LLMError) as caught:
         metered.complete_text(system="s", user="u")
     assert caught.value.kind == "budget"
+
+
+# ---------------------------------------------------------------- gaps the mutation run found
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I don't understand any of this, can I speak to someone?",
+        "This is not working, let me talk to a person",
+        "I'm not happy with this, connect me to a manager",
+        "I never got an answer, get me a supervisor",
+        "I'm not happy connect me to a manager",
+    ],
+)
+def test_a_request_for_a_person_after_a_complaint_is_honoured_in_any_phase(agent: Agent, text: str):
+    before = Convo(agent)
+    before.say(text)
+    assert before.s.phase == ESCALATED, "before verification"
+    after = Convo(agent)
+    after.run(DEMO_UTTERANCE, text)
+    assert after.s.phase == ESCALATED, "after verification"
+
+
+def test_the_policy_number_never_counts_as_one_of_the_three(convo: Convo):
+    result = verify_identity(convo.agent.data, {"policy_number": "POL-9921", "full_name": "Margaret Chen", "dob": "1985-03-15"})
+    assert not result.verified and result.matched == ["full_name", "dob"]
+    reply = convo.say("Margaret Chen, policy POL-9921, date of birth 1985-03-15")
+    assert not convo.s.verified and convo.s.phase == VERIFY_ID and "one more detail" in reply
+    assert_no_leak(reply, allow=("POL-",))
+
+
+def test_the_policy_number_breaks_a_tie_and_an_unknown_one_is_wrong(agent: Agent):
+    tied = verify_identity(agent.data, {"dob": "1985-03-15", "id_last4": "6688"})
+    assert tied.record is None
+    pinned = verify_identity(agent.data, {"dob": "1985-03-15", "id_last4": "6688", "policy_number": "POL-8836"})
+    assert pinned.record.name == "Ma Tian" and pinned.matched == ["id_last4"] and pinned.conflicts == ["dob"]
+    alone = verify_identity(agent.data, {"policy_number": "POL-0000"})
+    assert alone.conflicts == ["policy_number"] and not alone.verified
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Send it? No, skip it.", "please skip it, there is no reason to send it", "why would you send it?", "who would you send it to?"],
+)
+def test_send_and_skip_in_one_message_or_a_question_about_sending_sends_nothing(agent: Agent, text: str):
+    c = at_email_offer(agent)
+    c.say(text)
+    assert not c.s.outbox and c.s.phase == POST_PROCESS and "send_email_summary" not in c.tools
+
+
+def test_asking_for_the_summary_again_after_it_was_sent(agent: Agent):
+    c = at_email_offer(agent)
+    c.say("yes please")
+    assert len(c.s.outbox) == 1
+    for text in ("can you send it again?", "please resend the summary"):
+        reply = c.say(text)
+        assert c.act == "EMAIL_ALREADY_SENT" and "already gone to" in reply and len(c.s.outbox) == 1
+        assert c.s.phase == CLOSED
+
+
+@pytest.mark.parametrize("text", ["its margaret", "fair enough", "makes sense", "Speak English", "Cell Number", "oh boy"])
+def test_a_short_reply_is_not_even_read_as_a_name(convo: Convo, text: str):
+    convo.say(text)
+    assert "full_name" not in convo.trace["understanding"]["identity"]
+    assert convo.act != "VERIFY_NAME_NOT_FOUND" and convo.s.name_misses == 0
+
+
+def test_guessed_names_are_dropped_a_few_times_and_then_not_tried_at_all(convo: Convo):
+    for text in ("jane doe", "john smith", "mary jones"):
+        convo.say(text)
+        assert convo.act == "VERIFY_ASK"
+    assert convo.s.name_misses == 3 and convo.s.failed_attempts == 0
+    convo.run("peter pan", "wendy darling", "captain hook", "tiger lily")
+    assert convo.s.failed_attempts == 0 and convo.s.phase == VERIFY_ID  # further guesses neither probe nor count
+    convo.say("margaret chen")
+    assert "full_name" not in convo.s.memory.identity  # the allowance is spent, so even a right guess is not tried
+    convo.say("My name is Margaret Chen")
+    assert convo.s.verification["matched"] == ["full_name"]
+
+
+def test_a_reply_read_as_a_name_cannot_replace_a_confirmed_name(convo: Convo):
+    convo.say("My name is Margaret Chen")
+    convo.say("Blue Cross")  # capitalised, so it is read as a name
+    assert convo.trace["understanding"]["identity"] == {"full_name": "Blue Cross"}
+    assert convo.s.memory.identity["full_name"] == "Margaret Chen" and convo.s.failed_attempts == 0
+    assert convo.s.verification["matched"] == ["full_name"]
+
+
+@pytest.mark.parametrize(
+    "reply, problem",
+    [
+        ("Thanks. Is your policy number POL-9921?", "ungrounded policy number"),
+        ("Thanks. Does your SSN end in 4472?", "identity number from the records"),
+        ("I can't go into detail yet, but there is an auto claim in progress.", "claim summary that was not provided"),
+        ("Is this about the pathology report and office note?", "requested document"),
+        ("", "empty reply"),
+        ("word " * 500, "reply too long"),
+    ],
+)
+def test_guard_rules_for_values_held_on_file(convo: Convo, reply: str, problem: str):
+    convo.say("My name is Margaret Chen")
+    directive = Directive(act="VERIFY_PROGRESS", goal="", fallback="ok", facts={})
+    verdict = check_reply(reply, session=convo.s, directive=directive, data=convo.agent.data)
+    assert not verdict.ok and any(problem in violation for violation in verdict.violations), verdict.violations
+
+
+def test_guard_ignores_earlier_facts_until_the_caller_is_verified(convo: Convo):
+    convo.say("My name is Margaret Chen")
+    convo.s.grounded.append('{"amount": "$1,450.00", "claim": "CL-2048"}')  # must not count before verification
+    directive = Directive(act="VERIFY_PROGRESS", goal="", fallback="ok", facts={})
+    verdict = check_reply("Your claim CL-2048 was for $1,450.00.", session=convo.s, directive=directive, data=convo.agent.data)
+    assert not verdict.ok and any("ungrounded" in violation for violation in verdict.violations)
+
+
+def test_declining_too_many_details_three_times_ends_with_a_person(convo: Convo):
+    convo.say("I'm Margaret Chen. I don't have my SSN, my phone or my email on me.")
+    assert convo.act == "VERIFY_IMPOSSIBLE"
+    convo.say("I told you, I don't have them")
+    assert convo.act == "VERIFY_IMPOSSIBLE" and convo.s.phase == VERIFY_ID
+    convo.say("no, I won't give those")
+    assert convo.s.phase == ESCALATED and not convo.s.verified
+
+
+def test_no_at_the_claim_question_is_taken_as_not_on_file(convo: Convo):
+    convo.say(LISTED)
+    reply = convo.say("no")
+    assert convo.act == "NOT_ON_FILE" and "CL-" not in reply and convo.s.pending == "human_offer"
+
+
+def test_each_token_gets_its_own_model_client():
+    from sop_harness.llm import get_anthropic_llm
+
+    first = get_anthropic_llm("token-one", model="claude-haiku-5-5", effort="low")
+    again = get_anthropic_llm("token-one", model="claude-haiku-5-5", effort="low")
+    other = get_anthropic_llm("token-two", model="claude-haiku-5-5", effort="low")
+    assert first is again and first is not other
+
+
+def test_sessions_do_not_share_state_and_old_ones_expire(client: TestClient, monkeypatch):
+    import server.app as server
+
+    one, two = _start(client), _start(client)
+    client.post("/api/chat", json={"session_id": one, "message": DEMO_UTTERANCE, "engine": "offline"})
+    assert client.get(f"/api/session/{one}").json()["state"]["verified"] is True
+    assert client.get(f"/api/session/{two}").json()["state"]["verified"] is False
+    monkeypatch.setattr(server, "SESSION_TTL_SECONDS", -1)
+    _start(client)  # starting a conversation prunes the expired ones
+    assert client.get(f"/api/session/{one}").status_code == 404
+
+
+def test_nothing_on_file_is_shown_in_the_inspector_before_consent(agent: Agent):
+    c = Convo(agent, scenario="timeout")
+    c.say("I'm calling for my wife Margaret Chen, her DOB is 1985-03-15, SSN last four 4472. My name is David Chen.")
+    state = agent.public_state(c.s)
+    assert state["verified"] is False and state["caller"]["policy_number"] == "" and state["caller"]["email_on_file"] == ""
+    assert state["case_id"] is None and "get_claim_summary" not in state["allowed_tools"]

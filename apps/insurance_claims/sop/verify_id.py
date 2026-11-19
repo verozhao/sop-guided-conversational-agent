@@ -93,10 +93,16 @@ class VerifyIdPhase(PolicyBase):
         s.verification = result.summary()
         s.identity_ok = result.verified
         s.party_id = result.record.party_id if result.verified and result.record else None
+        if s.pending == "role_check" and m.caller_role == "unknown" and u.affirmation != "none":
+            # the answer to "are you the policyholder yourself?"
+            m.caller_role = "policyholder" if u.affirmation == "yes" else "representative"
+            m.role_unclear = False
         is_rep = self._is_rep(s)
 
         if result.verified:
             if not is_rep:
+                if m.role_unclear and m.caller_role == "unknown":
+                    return self._role_check(s, t)
                 self._grant(s, t, "three identity details matched one policyholder record")
                 return None
             return self._rep_gate(s, u, t)
@@ -398,6 +404,34 @@ class VerifyIdPhase(PolicyBase):
             facts=facts,
             cover=cover + rep_cover,
             must_not=rep_rules,
+        )
+
+    def _role_check(self, s: Session, t: TurnCtx) -> Directive:
+        """The details match, but the caller mentioned somebody else and never said who is calling.
+
+        A policyholder answers yes and goes on. Anyone else goes through the representative gate.
+        """
+        asked = s.pending == "role_check"
+        if asked:
+            s.role_checks += 1
+            if s.role_checks >= 2:
+                return self._escalate(
+                    s, t, "it could not be established whether the caller is the policyholder",
+                    lead="I'm sorry, I couldn't tell whether you are the policyholder, so a person needs to take it from here.",
+                )
+        s.pending = "role_check"
+        text = (
+            "Sorry, I need a clear answer before I can go on: are you the policyholder yourself, yes or no?"
+            if asked
+            else "Thank you, those details check out. One question before I go on: are you the policyholder yourself?"
+        )
+        return self._directive(
+            s, t, "ROLE_CHECK",
+            goal="The details match, but it is unclear whether the caller is the policyholder or someone calling for them. Ask, and say nothing about any claim.",
+            fallback=text,
+            facts={"why_this_is_asked": "Claim details go to the policyholder, or to a representative the policyholder has approved."},
+            cover=["Say the details check out.", "Ask one question: whether the caller is the policyholder themselves."],
+            rules=REP_GATE_RULES,
         )
 
     def _rep_gate(self, s: Session, u: Understanding, t: TurnCtx) -> Directive | None:
