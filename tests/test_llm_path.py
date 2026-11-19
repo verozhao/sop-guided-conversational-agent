@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +14,7 @@ from apps.insurance_claims.understanding import (
 )
 from sop_harness.llm import FALLBACK_BETA, AnthropicLLM, LLMError, ScriptedLLM
 
-from .conftest import PROTECTED, Convo
+from .conftest import DEMO_UTTERANCE, PROTECTED, Convo
 
 
 def reading(**overrides) -> dict:
@@ -336,5 +335,18 @@ def test_invalid_json_from_the_model_is_an_error():
     llm = AnthropicLLM(api_key="k", model="claude-haiku-5-5", client=_client(endpoint, endpoint))
     with pytest.raises(LLMError) as caught:
         llm.complete_json(system="s", user="u", schema={"type": "object"})
-    assert caught.value.kind == "bad_output"
-    assert json.loads("{}") == {}
+    assert caught.value.kind == "bad_output" and not caught.value.fatal_for_turn
+
+
+def test_a_models_no_to_the_email_offer_is_honoured(agent: Agent):
+    c = Convo(agent)
+    c.run(DEMO_UTTERANCE, "No, that's all.")
+    for answer in (reading(affirmation="no"), reading(email_summary_choice="skip")):
+        other = Convo(agent)
+        other.run(DEMO_UTTERANCE, "No, that's all.")
+        other.llm = scripted([answer], ["No problem, I won't send it. Take care."])
+        other.say("I'd rather you didn't, thanks")
+        assert other.act == "EMAIL_SKIPPED" and not other.s.outbox and "send_email_summary" not in other.tools
+    c.llm = scripted([reading()], ["Would you like me to send it, or skip it?"])
+    c.say("hmm, let me think")
+    assert c.act == "EMAIL_OFFER_REPEAT" and not c.s.outbox  # no reading of yes means nothing is sent

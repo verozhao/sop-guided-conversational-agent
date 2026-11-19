@@ -233,7 +233,7 @@ server/app.py                FastAPI app
 server/static/index.html     test UI
 scripts/demo.py              scripted conversations in the terminal, offline
 scripts/live_check.py        the same conversations against the real model, with a spending cap
-tests/                       407 tests, all offline
+tests/                       410 tests, all offline
 ```
 
 ## Tests
@@ -255,11 +255,12 @@ The suite covers the demo case, the verification gate, the bonus scenarios, scop
 .venv/bin/python scripts/live_check.py --ping                          # one tiny call to check the token
 .venv/bin/python scripts/live_check.py --scenarios happy,bonus         # capped at $0.50 by default
 .venv/bin/python scripts/live_check.py --scenarios all --model claude-haiku-5-5 --max-usd 0.10
+.venv/bin/python scripts/live_check.py --offline --scenarios all       # the same outcome checks on the offline engine, free
 ```
 
 Ten scenarios are included: the seven demo scripts plus three that only a model can follow (spoken-style language such as "bday is march fifteenth nineteen eighty five", prompt injection before verification, and an anxious caller with a missing document).
 
-Results on 2026-11-19:
+Results on 2026-11-19, before the last round of review fixes:
 
 | Model | Turns | Outcome checks | Replies written by the model | Median time per turn | Cost per turn |
 |---|---|---|---|---|---|
@@ -269,6 +270,8 @@ Results on 2026-11-19:
 | `claude-fable-5-2` | 1 | passed | 1 of 1 | 4.9 s | about $0.08 |
 
 The two Haiku replies that were not used had been rejected by the output guard for wording that was in fact correct. Both guard rules were corrected and are covered by `tests/test_regressions.py`, along with the other problems the live runs exposed.
+
+The last round of review fixes came after these runs. It added two fields to the understanding schema, extended the understanding prompt and widened the output guard. On the final version the outcome checks of the seven scripted scenarios pass on the offline engine (`--offline`, also run by the test suite), and the model path is covered by the scripted tests. The live runs have not been repeated on the final version, so repeat them with your own token if you want the numbers for it.
 
 The Docker image was built and run: the container passes its health check, serves all seven demo scripts, and answers through the model when the token is passed with `-e`.
 

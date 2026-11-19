@@ -3,6 +3,7 @@
     python scripts/live_check.py --ping                      # one tiny call to check the token
     python scripts/live_check.py --scenarios happy,bonus     # default model, capped at $0.50
     python scripts/live_check.py --model claude-haiku-5-5 --max-usd 0.10 --out run.json
+    python scripts/live_check.py --offline --scenarios all   # same outcome checks, offline engine, no token
 
 The token is read from ANTHROPIC_API_KEY or from a .env file (--env-file, or
 .env in the project root). It is never printed. Every call's cost is computed
@@ -272,7 +273,15 @@ class Report:
     latencies: list[int] = field(default_factory=list)
 
 
-def run_scenario(name: str, scenario: dict, agent: Agent, llm: MeteredLLM, report: Report, verbose: bool) -> None:
+class NoModel:
+    """Stands in for the metered client in --offline mode: nothing is called and nothing is spent."""
+
+    def __init__(self) -> None:
+        self.meter = Meter(cap=float("inf"))
+        self.turn_cost = 0.0
+
+
+def run_scenario(name: str, scenario: dict, agent: Agent, llm: MeteredLLM | NoModel, report: Report, verbose: bool) -> None:
     session = agent.new_session(scenario.get("consent_scenario", "default"))
     checks = CHECKS.get(name, [])
     record: dict[str, Any] = {"name": name, "title": scenario["title"], "greeting": session.history[0]["text"], "turns": []}
@@ -284,7 +293,7 @@ def run_scenario(name: str, scenario: dict, agent: Agent, llm: MeteredLLM, repor
             break
         was_verified = session.verified
         llm.turn_cost = 0.0
-        out = agent.handle(session, line, llm=llm)
+        out = agent.handle(session, line, llm=None if isinstance(llm, NoModel) else llm)
         trace = out["trace"]
         report.turns += 1
         report.latencies.append(trace["latency_ms"])
@@ -362,11 +371,28 @@ def main() -> int:
     parser.add_argument("--ping", action="store_true", help="make one tiny call to check the token, then exit")
     parser.add_argument("--quiet", action="store_true", help="do not print the conversation text")
     parser.add_argument("--turns", type=int, default=0, help="stop each scenario after this many caller lines")
+    parser.add_argument("--offline", action="store_true", help="run the outcome checks on the offline engine: no token, no cost")
     args = parser.parse_args()
+
+    if args.offline:
+        names = list(OFFLINE_SCENARIOS) if args.scenarios == "all" else [n.strip() for n in args.scenarios.split(",") if n.strip()]
+        unknown = [n for n in names if n not in everything]
+        if unknown:
+            print("Unknown scenario(s): " + ", ".join(unknown))
+            return 2
+        report = Report()
+        agent = Agent()
+        for name in names:
+            run_scenario(name, dict(everything[name]), agent, NoModel(), report, verbose=not args.quiet)
+        print(f"\n--- summary\noffline engine, turns {report.turns}")
+        for failure in report.failures:
+            print("  - FAILED: " + failure)
+        print("all checks passed" if not report.failures else f"FAILED checks ({len(report.failures)})")
+        return 1 if report.failures else 0
 
     key = load_key(args.env_file)
     if not key:
-        print("No token found. Set ANTHROPIC_API_KEY or pass --env-file.")
+        print("No token found. Set ANTHROPIC_API_KEY or pass --env-file, or use --offline.")
         return 2
 
     ledger_path = Path(args.ledger) if args.ledger else None

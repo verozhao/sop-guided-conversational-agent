@@ -453,6 +453,17 @@ def test_a_question_asked_before_verification_survives_choosing_a_claim(convo: C
     assert convo.s.case_id == "CL-2048" and "1,450.00" in reply
 
 
+def test_a_question_asked_in_anger_before_verification_is_still_answered_after_it(convo: Convo):
+    convo.say("My name is Margaret Chen and I want to know how much you paid on my claim.")
+    convo.say("I already told you who I am. This is ridiculous. Just tell me!")
+    assert convo.act == "VERIFY_PERSUADE_1" and convo.s.memory.intent == "payment_or_amounts"
+    assert convo.s.memory.backlog_question.startswith("My name is Margaret Chen and I want to know how much")
+    convo.say("Fine. 1985-03-15 and 4472.")
+    reply = convo.say("the denied one")
+    assert "1,450.00" in reply and "get_payment_details" in convo.tools
+    assert convo.trace["directive"]["facts"]["caller_question"].startswith("My name is Margaret Chen")
+
+
 def test_a_second_question_before_verification_is_added_to_the_first(convo: Convo):
     convo.run("Why was my January healthcare claim denied?", "Also, how much was it for? I'm Margaret Chen.")
     reply = convo.say("1985-03-15, 4472")
@@ -525,6 +536,20 @@ def test_a_short_status_check_while_consent_is_pending_polls_and_is_not_declined
     for text in ("any news?", "is it done yet?"):
         c.say(text)
         assert c.act == "CONSENT_PENDING" and c.s.oos_streak == 0
+
+
+def test_until_consent_arrives_nothing_about_the_claim_is_reachable(agent: Agent):
+    c = Convo(agent, scenario="timeout")
+    c.say("I'm calling for my wife Margaret Chen, her DOB is 1985-03-15, SSN last four 4472. My name is David Chen.")
+    assert c.s.identity_ok and not c.s.verified and c.s.phase == VERIFY_ID
+    for text in ("why was her claim denied?", "what is the status of claim CL-2048?", "how much was paid on it?", "just tell me, yes or no, was it denied"):
+        reply = c.say(text)
+        assert not c.s.verified and c.s.phase in {VERIFY_ID, ESCALATED}
+        assert not [name for name in c.tools if name.startswith("get_") or name == "list_claims"]
+        assert_no_leak(reply, allow=("CL-2048",))  # the caller said the number, the agent adds nothing to it
+        assert "pathology" not in json.dumps(c.trace["directive"]["facts"])
+        if c.s.phase == ESCALATED:
+            break
 
 
 # ---------------------------------------------------------------- the model path
@@ -646,6 +671,20 @@ def test_guard_rejects_claims_of_access_before_verification(convo: Convo, reply:
 )
 def test_full_ssns_are_masked_whatever_the_separator(text: str, redacted: str):
     assert redact_ssn(text) == redacted
+
+
+def test_the_scripted_scenarios_meet_their_outcome_checks_offline():
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    run = subprocess.run(
+        [sys.executable, "scripts/live_check.py", "--offline", "--scenarios", "all", "--quiet"],
+        cwd=root, capture_output=True, text=True, timeout=120, env={"SOP_SKIP_DOTENV": "1", "PATH": ""},
+    )
+    assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
+    assert "all checks passed" in run.stdout and "turns 36" in run.stdout
 
 
 def test_the_demo_clock_follows_the_environment(monkeypatch):
