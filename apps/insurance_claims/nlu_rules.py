@@ -14,7 +14,7 @@ import re
 from datetime import date
 
 from .data import ClaimsData
-from .normalize import MONTH_ALT, MONTHS, find_dates, name_tokens, norm_claim_id
+from .normalize import MONTH_ALT, MONTHS, find_dates, name_tokens, names_match, norm_claim_id
 from .state import CLOSED, PROCESS_CASE, RESOLVE_INTENT, VERIFY_ID, Session
 from .understanding import MENTIONS_OTHER_RE, Understanding, clean_representative_name, normalize_identity
 
@@ -824,7 +824,7 @@ _KIN_ONLY = (
     r"fianc[e\u00e9]e?|boyfriend|girlfriend|hubby|wifey|missus|family|relatives?|in-law|friend|neighbou?r)"
 )
 _ACTING_ROLE = (
-    r"(?:representative|rep|lawyer|attorney|guardian|caregiver|caretaker|carer|poa|proxy|executor|trustee|beneficiary|dependa?nt|"
+    r"(?:representative|rep|lawyer|attorney|guardian|caregiver|caretaker|carer|poa|proxy|executor|trustee|beneficiary|depend[ae]nt|"
     r"secretary|assistant|nurse|employee|colleague|housekeeper|aide|helper|accountant|broker|agent|advocate|case\s?worker|social\s+worker)"
 )
 _KINSHIP = rf"(?:{_KIN_ONLY}|{_ACTING_ROLE})"
@@ -1114,9 +1114,15 @@ def _claim_talk(clause: str, holders: list[tuple[str, ...]]) -> bool:
 
 
 def holder_names(data: ClaimsData, party_id: str | None, given: str = "") -> list[str]:
-    """Every name the policyholder goes by: the one the caller gave, the one on record and its aliases."""
+    """Every name the policyholder goes by.
+
+    Once the record is known these come from the record alone. A name the caller types is theirs
+    to prove: it is compared with these, and never becomes one of them by being said.
+    """
     party = data.party(party_id) if party_id else None
-    return [name for name in (given, *((party.name, *party.name_aliases) if party else ())) if name]
+    if party:
+        return [party.name, *party.name_aliases]
+    return [given] if given else []
 
 
 def _clause_kind(clause: str, holders: list[tuple[str, ...]]) -> str:
@@ -1382,7 +1388,7 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
     # A reply that is only a name, possibly next to other details: "Jane Doe, 0000"
     if in_verify:
         dob_known = "dob" in raw or "dob" in memory.identity
-        known_name = (memory.identity.get("full_name") or "").lower()
+        record_names = holder_names(data, session.candidate_id, memory.identity.get("full_name") or "")
         segments = [seg.strip() for seg in re.split(r"[,;\n]|\band\b|[.!?](?:\s|$)", work) if seg.strip()]
         for piece in segments:
             # a four-digit number standing alone, possibly after a name: "jane doe 0000"
@@ -1414,13 +1420,14 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
                     name, guess = word, True  # one capitalised word: part of a name
             if not name:
                 continue
-            if pending == "role_check" and known_name and name.lower() != known_name and not guess:
+            is_holders = any(names_match(name, known) for known in record_names)
+            if pending == "role_check" and record_names and not is_holders and not guess:
                 # asked "are you the policyholder yourself?", they answer with another name
                 u.representative_name = u.representative_name or name
                 u.caller_role = "representative"
             elif pending == "rep_name" or (is_rep and bool(session.rep_name_refused) and not guess):
                 # asked for their own name, or correcting the one that was not found ("sorry, David Chen")
-                if name.lower() == known_name:
+                if is_holders:
                     u.guessed.append("self_is_holder")
                 elif len(name.split()) > len(u.representative_name.split()):
                     u.representative_name = name  # "Chen. David Chen.": the fuller reading wins

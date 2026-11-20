@@ -251,7 +251,7 @@ server/app.py                FastAPI app
 server/static/index.html     test UI
 scripts/demo.py              scripted conversations in the terminal, offline
 scripts/live_check.py        the same conversations against the real model, with a spending cap
-tests/                       1392 tests, all offline
+tests/                       1400 tests, all offline
 ```
 
 ## Tests
@@ -297,6 +297,9 @@ The Docker image was built and run: the container passes its health check, serve
 - The limit on failed identity attempts is per conversation. A new conversation starts a new count, and limiting attempts across conversations would need caller identification that this demo does not have.
 - A policyholder is told which of their details matched ("I've confirmed your full name"), which makes verification easier to complete and also tells a guesser which values were right. A representative is not told. Wrong values are limited by the attempt count.
 - The gate cannot detect a lie. Someone who knows three details and answers the role question with a plain yes is treated as the policyholder. What the gate rules out is a third party getting through by describing themselves truthfully, or by wording the rules did not expect.
+- Talk about the claim may stand next to a yes ("Yes, why was it denied?"). Whether another person is in it is decided by a list of words for people. A caller who says yes and then names someone with a word the list lacks ("yes, about my moms claim", "yes, for my boss") is taken at their yes.
+- "I'm the policyholder" in an opening counts as the outright statement also when the same message takes it back in an unusual way ("I'm the policyholder? No.").
+- A policyholder who introduces herself by a nickname the record does not have ("Yes, I'm Maggie") is treated as another person and handed to a human. A representative's name is read in the usual forms ("David Chen", "David", then "Chen"). "My first name is David, last name Chen" is not read, and that step then ends with a person.
 - The role question needs an answer in English: an outright statement or a plain yes. A yes in another language, or with words next to it that cannot be placed, is asked again, also when a model is used. A policyholder who answers with more than a yes ("Yes, I'm the policyholder. My husband is covered under my plan.") is therefore asked once more.
 - A caller who answers the role question as somebody's relative ("yes, I'm her husband") goes through the representative checks for the rest of the call. A policyholder who meant a dependant on their own plan is handed to a person when they then give the policyholder's name as their own. The agent does not settle that contradiction itself.
 - A phone number or an email address counts as an identity detail only when it is offered as the caller's own ("my phone is ...", a value on its own, an item in a list of details). Mentioned in any other sentence it is not read, so it neither matches nor counts as a failed attempt.

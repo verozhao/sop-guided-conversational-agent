@@ -474,3 +474,40 @@ def test_the_policyholder_with_a_three_part_name_gets_through(agent: Agent):
     assert convo.act == "ROLE_CHECK"
     convo.say("Yes, this is Ya Wen Li")
     assert convo.s.verified and convo.s.memory.caller_role == "policyholder"
+
+
+# ---------------------------------------------------------------- the fourth check
+
+
+@pytest.mark.parametrize("answer", ["John Smith", "David Chen", "Me, John Smith", "I'm David Chen", "My name is John Smith."])
+def test_a_name_typed_at_the_role_question_is_never_the_policyholders_by_assertion(agent: Agent, answer: str):
+    # Verified on three details without a name. The name then given is compared with the record.
+    convo = Convo(agent, scenario="timeout", answers_role=False)
+    convo.say("1985-03-15, 4472, margaret@email.com")
+    assert convo.act == "ROLE_CHECK"
+    for line in (answer, "yes", "Why was my claim denied? CL-2048"):
+        reply = convo.say(line)
+        assert not convo.s.verified and convo.s.memory.caller_role == "representative"
+        assert_no_leak(reply, allow=("CL-2048", "margaret@email.com"))
+
+
+def test_a_models_name_at_the_role_question_is_compared_with_the_record_too(agent: Agent):
+    details = reading(identity={"dob": "1985-03-15", "id_last4": "4472", "email": "margaret@email.com"})
+    named = reading(identity={"full_name": "David Chen"}, caller_role="policyholder", affirmation="yes")
+    readings = [details, named]
+    convo = Convo(agent, scenario="timeout", llm=ScriptedLLM(on_json=lambda *_: readings.pop(0), on_text=lambda *_: "Thank you."))
+    convo.say("1985-03-15, 4472, margaret@email.com")
+    convo.say("I'm David Chen")
+    assert not convo.s.verified and convo.s.memory.caller_role == "representative"
+
+
+def test_the_policyholders_own_name_at_the_role_question_still_opens_the_gate(agent: Agent):
+    convo = Convo(agent, answers_role=False)
+    convo.say("1985-03-15, 4472, margaret@email.com")
+    convo.say("Margaret Chen")
+    assert convo.s.verified and convo.s.memory.caller_role == "policyholder"
+
+
+def test_a_dependent_in_either_spelling_is_not_talk_about_the_claim():
+    for answer in ("Yes, about the denied claim. Covered as a dependent.", "Yes, about the denied claim. Covered as a dependant.", "I'm only a dependent."):
+        assert role_answer(answer, ["Margaret Chen"]) != "self", answer

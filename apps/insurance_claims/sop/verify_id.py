@@ -107,6 +107,17 @@ class VerifyIdPhase(PolicyBase):
         # Every name the policyholder goes by. A name the caller gives as their own is somebody
         # else's only when it is none of them.
         known = holder_names(self.data, s.candidate_id, m.identity.get("full_name") or "")
+        given = m.identity.get("full_name") or ""
+        if result.verified and given and "full_name" in result.conflicts:
+            # Three details are the policyholder's and the name is not. A slip of the keyboard
+            # ("Margret Chen") is dropped. Any other name is the caller's own, however it arrived:
+            # typed at the opening, given in answer to the role question, or read by a model.
+            slip = any(difflib.SequenceMatcher(None, given.lower(), name.lower()).ratio() >= 0.8 for name in known)
+            del m.identity["full_name"]
+            if not slip and not m.representative_name:
+                m.representative_name = given
+            result = verify_identity(self.data, m.identity, prefer=s.candidate_id)
+            s.verification = result.summary()
         stated_before = False
         if result.verified and not s.verified:
             # The record is known now. Did the caller say earlier, in so many words, that they are
@@ -122,6 +133,9 @@ class VerifyIdPhase(PolicyBase):
             if stated_before:
                 m.caller_role, m.role_guessed, m.role_unclear = "representative", False, False
         own_name = bool(m.representative_name) and not any(names_match(m.representative_name, name) for name in known)
+        if result.verified and not s.verified and own_name and m.caller_role != "representative":
+            # They gave a name of their own that is not the policyholder's. That is a statement of who is calling.
+            m.caller_role, m.role_guessed, m.role_unclear = "representative", False, False
         if s.pending == "role_check":
             # The answer to "are you the policyholder yourself?". The caller's own words decide,
             # whichever engine read them. Only a yes that points at nobody else opens the gate:
