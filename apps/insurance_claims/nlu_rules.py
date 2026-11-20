@@ -203,7 +203,7 @@ DECLINE_FIELDS = [
 ]
 REFUSAL_RE = re.compile(
     r"already\s+(?:told|gave|said|explained|provided|verified|went\s+through)|"
-    r"\bjust\s+(?:tell|give|answer|show)\s+me\b|"
+    r"\bjust\s+(?:tell|give|answer|show)\s+me\b|\bjust\s+answer\s+(?:my|the|it|us)\b|"
     r"\b(?:not|won't|will\s+not|wont|refuse\s+to|don't\s+want\s+to|do\s+not\s+want\s+to|not\s+going\s+to|"
     r"shouldn't\s+have\s+to|should\s+not\s+have\s+to|don't\s+have\s+to|not\s+comfortable)\s+"
     r"(?:giv|shar|provid|tell|verif|answer|say|disclos)\w*|"
@@ -336,7 +336,7 @@ STATUS_RULES = [
     ("open", r"\bopen\b|\bin\s+progress\b|\bpending\b|\bprocessing\b|\bongoing\b|\bunder\s+review\b"),
     ("closed", r"\bclosed\b|\bsettled\b|\bcompleted\b|\bpaid\s+out\b|\bresolved\b"),
 ]
-_REF = r"(?:claims?|case|one)"
+_REF = r"(?:claims?|case|one|thing)"
 MONTH_CTX_RE = re.compile(
     rf"\b(?:from|in|of|last|this|back\s+in|filed\s+in|since|around|during|for)\s+({MONTH_ALT})\b|"
     rf"\b({MONTH_ALT})\s+(?:claim|20\d{{2}})\b",
@@ -635,6 +635,8 @@ def _take_name(rest: str, require_caps: bool) -> str:
         if not match:
             break
         word, punct = match.group(1), match.group(2)
+        if word.endswith("-") or rest[match.end(1): match.end(1) + 1].isdigit():
+            break  # "POL-9921", "CL-2048": part of an identifier, never of a name
         possessive = word.lower().endswith("'s")
         if possessive:
             word = word[:-2]
@@ -680,7 +682,7 @@ def _name_tail(candidate: str) -> str:
 _NUMBER_LEAD = set(
     """it it's its is that that's thats they they're theyre those these are be the my number numbers digits digit code
     should would um uh er erm hmm ok okay yes yeah yep yup sure then answer think i believe guess so well oh here you go
-    alright right sorry and just actually last four""".split()
+    alright right sorry and just actually last four try trying let's lets maybe perhaps or no wait meant instead""".split()
 )
 # A year can also be led into by "born in", "it was", "the year".
 _YEAR_LEAD = _NUMBER_LEAD | {"was", "in", "year", "born", "birth", "of", "around"}

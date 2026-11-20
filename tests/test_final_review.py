@@ -420,3 +420,55 @@ def test_being_patient_is_not_mentioning_a_patient(convo: Convo):
     other = Convo(convo.agent)
     other.say("I'm calling about a patient. Margaret Chen, 1985-03-15, 4472")
     assert other.act == "ROLE_CHECK" and not other.s.verified
+
+
+# ---------------------------------------------------------------- found by re-reading the brief before submission
+
+
+def test_a_policy_number_is_never_read_as_a_name(convo: Convo):
+    reply = convo.say("Is my policy number enough? It's POL-9921")
+    m = convo.s.memory
+    assert m.identity.get("policy_number") == "POL-9921" and "full_name" not in m.identity
+    assert convo.act == "VERIFY_EXPLAIN" and "doesn't count" in reply
+
+
+def test_the_car_thing_points_at_the_auto_claim(verified: Convo):
+    reply = verified.say("actually what about the car thing?")
+    assert verified.s.case_id == "CL-2102" and "not something I can do" not in reply
+
+
+def test_just_answer_my_question_is_pushback_on_verification(convo: Convo):
+    convo.say("I'm not telling you anything about me")
+    assert convo.act == "VERIFY_PERSUADE_1"
+    reply = convo.say("No. Just answer my question.")
+    assert convo.act == "VERIFY_PERSUADE_2" and "human representative" in reply and not convo.s.verified
+    other = Convo(convo.agent)
+    other.say("Can I just answer two of them?")  # a question about the step, answered as one
+    assert other.act == "VERIFY_EXPLAIN" and other.s.refusal_count == 0
+
+
+def test_try_before_a_number_is_an_answer(convo: Convo):
+    convo.run("Margaret Chen, born 1985-03-15", "0000")
+    assert convo.s.failed_attempts == 1
+    convo.say("try 4472")
+    assert convo.s.verified
+
+
+REP_OPENING = "I'm David Chen, calling for my mother Margaret Chen. Her date of birth is 1985-03-15 and her phone is 650-521-2836."
+
+
+def test_a_question_about_consent_is_answered_before_the_status_is_checked_again(convo: Convo):
+    convo.say(REP_OPENING)
+    assert convo.act == "CONSENT_REQUESTED"
+    reply = convo.say("Why do you need her consent? I'm her son.")
+    assert convo.act == "CONSENT_PENDING" and not convo.s.verified and "check_consent_status" not in convo.tools
+    assert "private information" in reply and "still waiting" in reply
+    assert_no_leak(reply)
+    convo.say("ok she approved it")
+    assert convo.s.verified and "check_consent_status" in convo.tools
+
+
+def test_a_caller_who_says_it_was_approved_gets_the_check_even_with_a_question(convo: Convo):
+    convo.say(REP_OPENING)
+    convo.say("She approved it, why is this taking so long?")
+    assert convo.s.verified

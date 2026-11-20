@@ -53,6 +53,15 @@ PARTIAL_LABELS = {
 REP_NAME_WHY = "Only a representative who is listed on the policy can be approved, so I need your own name to check that."
 
 
+# "she approved it", "it's done": the caller reports that the approval was given
+APPROVAL_SAID_RE = re.compile(
+    r"\b(?:has|have|just|already)\s+(?:approved|accepted|confirmed|consented)\b|\b(?:approved|accepted|confirmed)\s+(?:it|the|that|my)\b|"
+    r"\bsaid\s+(?:yes|ok|okay)\b|\b(?:it's|it\s+is|that's|all)\s+(?:done|approved|sorted)\b|"
+    r"\b(?:she|he|they)\s+(?:did|approved|accepted|consented)\b|^\W*(?:done|approved)\W*$",
+    re.I,
+)
+
+
 class VerifyIdPhase(PolicyBase):
     def _grant(self, s: Session, t: TurnCtx, reason: str) -> None:
         """The only place a session becomes verified."""
@@ -567,9 +576,12 @@ class VerifyIdPhase(PolicyBase):
 
         status = s.consent.get("status")
         first_request = status is None
+        # A question about the step ("why do you need her consent?") is answered before the status
+        # is checked again, unless the caller says the approval has been given.
+        asks_first = status == "pending" and u.process_question and not APPROVAL_SAID_RE.search(t.text)
         if first_request:
             status = self.tools.call("request_consent", s, t.trace)["status"]
-        elif status == "pending":
+        elif status == "pending" and not asks_first:
             status = self.tools.call("check_consent_status", s, t.trace)["status"]
         facts["consent_request"] = {"status": status, "sent_to": "the policyholder"}
 
@@ -597,8 +609,9 @@ class VerifyIdPhase(PolicyBase):
                 ]
             else:
                 explain = f"{self._explain_line(s, t)} " if u.process_question else ""
+                waiting = "I'm still waiting for the approval." if asks_first else "I've checked again and the approval hasn't come through yet."
                 text = (
-                    f"{explain}I've checked again and the approval hasn't come through yet. The request went to "
+                    f"{explain}{waiting} The request went to "
                     f"{holder} directly. Let me know when it's done and I'll check right away. {alternatives}"
                 )
                 cover = [

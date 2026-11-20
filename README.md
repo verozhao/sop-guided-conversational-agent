@@ -233,7 +233,7 @@ server/app.py                FastAPI app
 server/static/index.html     test UI
 scripts/demo.py              scripted conversations in the terminal, offline
 scripts/live_check.py        the same conversations against the real model, with a spending cap
-tests/                       744 tests, all offline
+tests/                       750 tests, all offline
 ```
 
 ## Tests
