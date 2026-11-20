@@ -209,6 +209,10 @@ FALSE_CLAIMS = [
     (ANSWERED, "You can upload them at portal.claims-help.co.uk/upload."),
     (ANSWERED, "Send them through secure.claims-portal.com today."),
     (ANSWERED, "No problem — I've sent the summary to your address."),
+    (ANSWERED, "No question, your appeal will be approved."),
+    (ANSWERED, "No worries, the summary has been sent."),
+    (NAME_ONLY, "No need to worry, you're verified now."),
+    (NAME_ONLY, "No you're verified, go ahead."),
 ]
 CORRECT_REPLIES = [
     (NAME_ONLY, "Yes, I can help with your claim as soon as your identity is verified. Could you give me any two of the details I listed?"),
@@ -222,6 +226,9 @@ CORRECT_REPLIES = [
     (ANSWERED, "Let me update you on where this stands: the claim is denied."),
     (ANSWERED, "I can arrange for a human representative to look at it with you."),
     (ANSWERED, "Nothing has been sent yet, and I can't promise it will be approved."),
+    (ANSWERED, "There's no guarantee it will be approved."),
+    (ANSWERED, "No email has been sent."),
+    (NAME_ONLY, "I can't confirm you're verified until I have two more details."),
 ]
 
 
@@ -270,3 +277,138 @@ def test_the_claim_list_is_still_reached_after_a_role_question(convo: Convo):
     convo.say("My husband told me to call. Margaret Chen, 1985-03-15, 4472")
     convo.say("yes")
     assert convo.s.phase == RESOLVE_INTENT and convo.act == "ASK_WHICH_CLAIM"
+
+
+# ---------------------------------------------------------------- found by probing the fixes above
+
+NAME_AND_DOB = "Margaret Chen, born 1985-03-15"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["it is 4472", "they're 4472", "that's 4472", "ends in 4472", "it ends in 4472", "yes 4472", "ok so it's 4472",
+     "should be 4472", "I think it's 4472", "the number is 4472", "that would be 4472", "here you go 4472"],
+)
+def test_a_lead_in_before_the_last_four_is_still_an_answer(convo: Convo, text: str):
+    convo.say(NAME_AND_DOB)
+    convo.say(text)
+    assert convo.s.verified and convo.s.failed_attempts == 0
+
+
+def test_a_year_after_a_lead_in_gets_the_note_about_the_full_date(convo: Convo):
+    convo.say("Margaret Chen")
+    convo.say("it was 1985")
+    assert convo.trace["understanding"]["partial"] == ["dob_or_id"] and convo.s.failed_attempts == 0
+
+
+def test_a_phone_number_right_after_a_policy_number_is_still_read(convo: Convo):
+    convo.say("Margaret Chen")
+    convo.say("policy number 9921 650-521-2836")
+    assert convo.s.memory.identity["policy_number"] == "POL-9921" and "phone" in convo.s.verification["matched"]
+
+
+@pytest.mark.parametrize("answer", ["I'm not sure what you mean", "I'm not comfortable answering that", "who else would I be?", "why do you ask?"])
+def test_a_question_about_the_role_question_is_not_read_as_a_no(convo: Convo, answer: str):
+    convo.say(MENTIONS_WIFE)
+    reply = convo.say(answer)
+    assert convo.act == "ROLE_CHECK" and convo.s.memory.caller_role == "unknown" and not convo.s.verified
+    assert "yes or no" in reply and "approved" in reply  # asked again, with the reason
+
+
+@pytest.mark.parametrize("answer", ["it's mine", "the policy is in my name", "I'm Margaret", "Margaret Chen", "obviously", "I'm the one on the policy"])
+def test_everyday_ways_of_saying_yes_to_the_role_question(convo: Convo, answer: str):
+    convo.say(MENTIONS_WIFE)
+    convo.say(answer)
+    assert convo.s.verified and convo.s.memory.caller_role == "policyholder"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["it's her policy", "she's the policyholder", "it's under her name", "it's my wife's policy", "I'm Margaret's husband",
+     "I'm Margaret Chen's son"],
+)
+def test_everyday_ways_of_saying_no_to_the_role_question(convo: Convo, answer: str):
+    convo.say(MENTIONS_WIFE)
+    reply = convo.say(answer)
+    assert not convo.s.verified and convo.s.memory.caller_role == "representative"
+    assert_no_leak(reply)
+
+
+@pytest.mark.parametrize(
+    "opening",
+    ["Hi, I'm calling for the status of my claim.", "calling for a claim update,", "I'm calling for my claim status.", "I'm calling for the denied claim."],
+)
+def test_calling_for_a_thing_is_not_calling_for_a_person(convo: Convo, opening: str):
+    convo.say(f"{opening} Margaret Chen, 1985-03-15, 4472")
+    assert convo.s.verified and convo.s.memory.caller_role == "unknown"
+
+
+@pytest.mark.parametrize("opening", ["I'm calling for my daughter.", "It's for my mom.", "I'm calling for a friend,", "I'm calling for the policyholder,", "I'm calling for her."])
+def test_calling_for_a_person_is_still_a_representative(convo: Convo, opening: str):
+    convo.say(f"{opening} Margaret Chen, 1985-03-15, 4472")
+    assert not convo.s.verified and convo.s.memory.caller_role == "representative" and convo.act == "ASK_REP_NAME"
+
+
+@pytest.mark.parametrize(
+    "first",
+    ["Calling about my son's claim. I'm Ma Tian, born 1964-09-10, last four 6688",
+     "I'm calling for my daughter's claim. I'm Ma Tian, born 1964-09-10, last four 6688",
+     "This is for my husband's knee surgery claim. I'm Ma Tian, 1964-09-10, 6688"],
+)
+def test_a_policyholder_calling_about_a_dependents_claim_is_asked_then_verified(convo: Convo, first: str):
+    reply = convo.say(first)
+    assert convo.act == "ROLE_CHECK" and convo.s.memory.identity["full_name"] == "Ma Tian" and not convo.s.memory.representative_name
+    assert "their" not in reply  # spoken to as the person whose details these are
+    convo.say("yes I am")
+    assert convo.s.verified and convo.s.memory.caller_role == "policyholder" and convo.s.failed_attempts == 0
+
+
+def test_a_third_party_who_names_both_people_is_not_taken_for_the_policyholder(convo: Convo):
+    convo.say("I'm David Chen, calling about my wife's claim. Margaret Chen, born 1985-03-15, last four 4472")
+    m = convo.s.memory
+    assert m.caller_role == "representative" and m.representative_name == "David Chen" and m.identity["full_name"] == "Margaret Chen"
+    assert not convo.s.verified and convo.s.failed_attempts == 0
+    other = Convo(convo.agent)
+    other.say("I'm David Chen, calling about my wife's claim. Her name is Margaret Chen, born 1985-03-15, last four 4472")
+    assert other.s.memory.representative_name == "David Chen" and not other.s.verified and other.s.failed_attempts == 0
+
+
+def test_a_model_that_gives_the_callers_own_name_as_a_representatives_is_settled_by_the_question(agent: Agent):
+    # The caller never says they act for anyone. The model reads "representative" and files their name under it.
+    first = reading(caller_role="representative", identity={"dob": "1964-09-10", "id_last4": "6688", "representative_name": "Ma Tian"})
+    second = reading(caller_role="representative", identity={"full_name": "Ma Tian"})
+    third = reading(caller_role="representative", affirmation="yes")
+    readings = [first, second, third]
+    c = Convo(agent, llm=ScriptedLLM(on_json=lambda *_: readings.pop(0), on_text=lambda *_: "Thank you."))
+    c.say("Calling about my son's claim. I'm Ma Tian, born 1964-09-10, last four 6688")
+    assert c.s.memory.role_guessed and c.s.memory.representative_name == "Ma Tian" and not c.s.verified
+    c.say("The policyholder is Ma Tian")
+    assert c.act == "ROLE_CHECK" and not c.s.verified
+    c.say("yes, that's me")
+    assert c.s.verified and c.s.memory.caller_role == "policyholder"
+
+
+def test_saying_i_am_the_policyholder_reopens_a_role_that_was_only_inferred(agent: Agent):
+    first = reading(caller_role="representative", identity={"dob": "1964-09-10", "id_last4": "6688", "representative_name": "Ma Tian"})
+    second = reading(caller_role="policyholder")
+    readings = [first, second]
+    c = Convo(agent, llm=ScriptedLLM(on_json=lambda *_: readings.pop(0), on_text=lambda *_: "Thank you."))
+    c.say("Calling about my son's claim. I'm Ma Tian, born 1964-09-10, last four 6688")
+    c.say("No, I'm the policyholder")
+    m = c.s.memory
+    assert c.s.verified and m.caller_role == "policyholder" and m.identity["full_name"] == "Ma Tian" and not m.representative_name
+
+
+def test_a_role_said_outright_later_is_no_longer_treated_as_inferred(convo: Convo):
+    convo.say("I'm calling about her claim")
+    assert convo.s.memory.role_guessed
+    convo.say("I'm her husband. Margaret Chen, 1985-03-15, 4472")
+    assert not convo.s.memory.role_guessed and convo.act == "ASK_REP_NAME" and not convo.s.verified
+
+
+
+def test_the_policyholders_name_in_the_possessive_is_not_a_yes(convo: Convo):
+    convo.say(MENTIONS_WIFE)
+    reply = convo.say("It's Margaret Chen's policy")
+    assert not convo.s.verified and convo.s.memory.caller_role != "policyholder"
+    assert_no_leak(reply)

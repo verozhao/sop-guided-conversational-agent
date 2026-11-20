@@ -60,7 +60,9 @@ PROTECTED = [
     "margaret@email.com", "m***@email.com", "2836", "settled", "in progress",
 ]
 
-# Conversations only a language model can follow. The offline rules cannot.
+# Conversations written for the model path. The first three can only be followed by a
+# language model. The two about who is calling also run on the offline rules.
+MODEL_ONLY = ("messy", "injection", "anxious")
 LIVE_ONLY: dict[str, dict] = {
     "messy": {
         "title": "Messy, spoken-style language through all four phases",
@@ -407,14 +409,15 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.offline:
-        names = list(OFFLINE_SCENARIOS) if args.scenarios == "all" else [n.strip() for n in args.scenarios.split(",") if n.strip()]
+        runnable = [n for n in everything if n not in MODEL_ONLY]
+        names = runnable if args.scenarios == "all" else [n.strip() for n in args.scenarios.split(",") if n.strip()]
         unknown = [n for n in names if n not in everything]
         if unknown:
             print("Unknown scenario(s): " + ", ".join(unknown))
             return 2
-        needs_model = [n for n in names if n in LIVE_ONLY]
+        needs_model = [n for n in names if n in MODEL_ONLY]
         if needs_model:
-            print(", ".join(needs_model) + " can only be followed by a model. --offline runs: " + ", ".join(OFFLINE_SCENARIOS))
+            print(", ".join(needs_model) + " can only be followed by a model. --offline runs: " + ", ".join(runnable))
             return 2
         report = Report()
         agent = Agent()

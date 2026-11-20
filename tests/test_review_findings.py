@@ -725,7 +725,7 @@ def test_the_scripted_scenarios_meet_their_outcome_checks_offline():
         cwd=root, capture_output=True, text=True, timeout=120, env={"SOP_SKIP_DOTENV": "1", "PATH": ""},
     )
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
-    assert "all checks passed" in run.stdout and "turns 36" in run.stdout
+    assert "all checks passed" in run.stdout and "turns 42" in run.stdout  # seven demo scripts and the two about who is calling
 
 
 def test_the_demo_clock_follows_the_environment(monkeypatch):

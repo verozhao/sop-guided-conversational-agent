@@ -164,23 +164,27 @@ class InsuranceSOP(VerifyIdPhase, ResolveIntentPhase, ProcessCasePhase, PostProc
         if not s.verified:
             already_matched = set(s.verification.get("matched", []))
             holder = (m.identity.get("full_name") or "").lower()
-            if u.source == "llm" and u.caller_role == "representative" and not u.representative_name and not states_third_party(t.text):
+            if u.source == "llm" and u.caller_role == "representative" and not states_third_party(t.text):
                 # The model concluded this from the wording ("my husband told me to call"). The
                 # caller did not say it, so it is settled with the role question, not assumed.
                 u.guessed.append("caller_role")
+            if u.caller_role == "representative" and m.caller_role == "representative" and "caller_role" not in u.guessed:
+                m.role_guessed = False  # now they have said it outright
             # Has the caller acted as a representative: given a name of their own that is not
             # the policyholder's, or been told they are not listed?
             acted_as_rep = bool(
-                (m.representative_name and m.representative_name.lower() != holder) or s.rep_denials or s.rep_name_refused
+                (m.representative_name and holder and m.representative_name.lower() != holder) or s.rep_denials or s.rep_name_refused
             )
             if m.caller_role == "representative" and m.role_guessed and not acted_as_rep and u.caller_role != "representative":
-                if OWN_DETAILS_RE.search(t.text):
+                if OWN_DETAILS_RE.search(t.text) or u.caller_role == "policyholder":
                     # The role was read from a turn of phrase, and now they give details as their
-                    # own ("my date of birth is ..."). Treat the role as open and ask later.
+                    # own ("my date of birth is ...") or say they are the policyholder. The role is
+                    # open again, and the name they gave as their own is checked like any other.
                     m.caller_role, m.role_guessed, m.role_unclear = "unknown", False, True
-                    if u.representative_name and "full_name" not in u.identity:
-                        u.identity["full_name"] = u.representative_name
-                    u.representative_name = ""
+                    own = u.representative_name or m.representative_name
+                    if own and "full_name" not in u.identity and not holder:
+                        u.identity["full_name"] = own
+                    u.representative_name, m.representative_name = "", ""
             for name, value in u.identity.items():
                 stored = m.identity.get(name, "")
                 if name == "full_name" and " " not in value and stored and " " not in stored and stored.lower() != value.lower():

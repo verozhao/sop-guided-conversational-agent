@@ -430,7 +430,8 @@ class VerifyIdPhase(PolicyBase):
                 )
         s.pending = "role_check"
         text = (
-            "Sorry, I need a clear answer before I can go on: are you the policyholder yourself, yes or no?"
+            "I ask because claim details can only go to the policyholder or to someone the policyholder has approved, "
+            "and I couldn't tell which you are. Are you the policyholder yourself? A yes or no is enough."
             if asked
             else "Thank you, those details check out. One question before I go on: are you the policyholder yourself?"
         )

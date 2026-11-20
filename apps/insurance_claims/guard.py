@@ -67,11 +67,23 @@ _WEEKDAY_RE = re.compile(
 # does a conjunction: "It's not a problem and your claim will be approved" is still a promise.
 _TOKEN = r"[\w'$%]+(?:[.,]\d+)*(?:-[\w']+)*"
 _WORDS = rf"(?:(?!(?:and|but|so|because|then|also|while|although|though)\b){_TOKEN}\s+)"
-# "nothing has been sent", "isn't something I can change". A bare "no" only counts directly
-# before the phrase ("no email was sent"), so "no doubt ... will be approved" stays a promise.
+# "nothing has been sent", "isn't something I can change", "no email has been sent", "no guarantee
+# it will be approved". "No doubt", "no problem" and the like mean yes, so they negate nothing.
 _NEGATED_RE = re.compile(
-    rf"(?:(?:\bnot|n't|\bnever|\bcannot|\bnothing|\bnobody|\bno one|\bunable to)\s+{_WORDS}{{0,5}}|\bno\s+)$", re.I
+    rf"(?:(?:\bnot|n't|\bnever|\bcannot|\bnothing|\bnobody|\bno one|\bunable to)\s+{_WORDS}{{0,5}}"
+    rf"|\bno\s+(?!(?:doubt|question|problem|worr\w*|wonder|matter|need|way|kidding|trouble|issue)\b){_WORDS}{{1,3}})$",
+    re.I,
 )
+_NO_DIRECT_RE = re.compile(r"\bno\s+$", re.I)
+
+
+def _negated(before: str, phrase: str) -> bool:
+    """A negation governs the phrase. "No guarantee" does. "No you're verified" starts a new clause."""
+    if _NEGATED_RE.search(before):
+        return True
+    return bool(_NO_DIRECT_RE.search(before)) and not re.match(r"(?:you|your|i|we)\b", phrase, re.I)
+
+
 _DOUBTED_RE = re.compile(rf"(?:\bwhether\s+{_WORDS}{{0,4}}|\bhow much\s+{_WORDS}{{0,2}}|\bif and when\s+{_WORDS}{{0,2}})$", re.I)
 # "once you're verified", "until I've sent it": only a subject may stand between the condition
 # and the phrase. "After checking you're verified" is a claim.
@@ -188,7 +200,7 @@ def _asserted(pattern: re.Pattern[str], text: str, conditions_soften: bool = Tru
     """
     for match in pattern.finditer(text):
         before = text[max(0, match.start() - 90): match.start()]
-        if _NEGATED_RE.search(before) or _DOUBTED_RE.search(before):
+        if _negated(before, match.group(0)) or _DOUBTED_RE.search(before):
             continue
         if conditions_soften and _CONDITIONAL_RE.search(before):
             continue
@@ -207,7 +219,7 @@ _REPORTED_RE = re.compile(
 def claims_verified(text: str) -> bool:
     for match in _VERIFIED_RE.finditer(text):
         before = text[max(0, match.start() - 90): match.start()]
-        if _NEGATED_RE.search(before) or _CONDITIONAL_RE.search(before) or _REQUIREMENT_RE.search(before):
+        if _negated(before, match.group(0)) or _CONDITIONAL_RE.search(before) or _REQUIREMENT_RE.search(before):
             continue
         if _REPORTED_RE.search(before):
             continue
