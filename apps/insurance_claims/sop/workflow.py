@@ -232,7 +232,10 @@ class InsuranceSOP(VerifyIdPhase, ResolveIntentPhase, ProcessCasePhase, PostProc
                     m.role_guessed = inferred
                     captured.append(f"caller_role={u.caller_role}")
             if u.representative_name and u.representative_name != m.representative_name:
-                m.representative_name = u.representative_name
+                own, stored = u.representative_name, m.representative_name
+                if stored and " " not in stored and " " not in own and own.lower() != stored.lower():
+                    own = f"{stored} {own}"  # "David", then "Chen", is David Chen
+                m.representative_name = own
                 captured.append("representative_name")
 
         if u.intent != "none":

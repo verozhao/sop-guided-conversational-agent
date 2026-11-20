@@ -176,7 +176,7 @@ The question about the denial is saved and answered as soon as verification comp
 
 Someone calling for a policyholder has to pass three checks: the policyholder's details match, the caller is listed as an authorized representative, and the policyholder approves a consent request. The consent status comes from `consent_scenarios.json` (choose `default` or `timeout` in the UI before starting a conversation). Until consent is approved the session stays in VERIFY_ID. A request that expires is not sent again: the caller is offered a person, and then handed to one.
 
-This gate depends on what the caller says about themselves ("I'm her husband", "I'm calling for Margaret Chen"). When that is unclear, the agent asks "are you the policyholder yourself?" once the details match and before anything is shared. It is unclear when a caller mentions somebody else without saying who is calling ("my wife asked me to call"), and when the role could only be inferred from the wording ("calling about my son's claim", which a parent says about a claim on their own policy as often as a third party does). Only a plain yes goes on as the policyholder. A no goes through the three checks above, and so does a yes that also says the caller is somebody else ("yes, I'm her son", "yes, for my mother"), whatever the model made of it. An answer that mentions another person without saying who is calling is asked once more, a question in reply is answered with the reason, and after a second unclear answer a person takes over. Someone who presents three correct details as their own and mentions nobody else is treated as the policyholder, as the three-detail rule says. A caller verified as the policyholder who later says they are acting for someone else is handed to a person.
+This gate depends on what the caller says about themselves ("I'm her husband", "I'm calling for Margaret Chen"). When that is unclear, the agent asks "are you the policyholder yourself?" once the details match and before anything is shared. It is unclear when a caller mentions somebody else without saying who is calling ("my wife asked me to call"), and when the role could only be inferred from the wording ("calling about my son's claim", which a parent says about a claim on their own policy as often as a third party does). The gate then opens only when the caller says outright that they are the policyholder ("I'm the policyholder", "it's my own policy") or gives a plain yes with nothing else in it. A yes is defined by what it may contain, so wording the rules have never seen cannot open the gate, and this is decided from the caller's own words, so a model's yes is never enough. A no, and a yes that describes the caller as somebody else ("yes, I'm her son", "yes, it's David"), go through the three checks above. Anything else is asked once more, a question in reply is answered with the reason, and after a second unclear answer a person takes over. Someone who presents three correct details as their own and mentions nobody else is treated as the policyholder, as the three-detail rule says. A caller verified as the policyholder who later says they are acting for someone else is handed to a person.
 
 ### Output guard
 
@@ -233,7 +233,7 @@ server/app.py                FastAPI app
 server/static/index.html     test UI
 scripts/demo.py              scripted conversations in the terminal, offline
 scripts/live_check.py        the same conversations against the real model, with a spending cap
-tests/                       858 tests, all offline
+tests/                       1067 tests, all offline
 ```
 
 ## Tests
@@ -245,7 +245,7 @@ tests/                       858 tests, all offline
 
 The suite is offline. It never reads `.env` and removes any token from the environment, so it cannot spend money.
 
-The suite covers the demo case, the verification gate, the bonus scenarios, scope control, claim resolution, the workflow paths, the email step, representative consent, harness enforcement (tool gating, illegal transitions), the output guard against leaking or overclaiming model replies, and the shape of the request sent to the Anthropic API. `tests/test_review_findings.py`, `tests/test_second_review.py` and `tests/test_final_review.py` hold a regression test for each problem found by the three code reviews before submission, and `tests/test_cold_check.py` does the same for an independent check of the finished version. `ruff check .` passes with the configuration in `ruff.toml`.
+The suite covers the demo case, the verification gate, the bonus scenarios, scope control, claim resolution, the workflow paths, the email step, representative consent, harness enforcement (tool gating, illegal transitions), the output guard against leaking or overclaiming model replies, and the shape of the request sent to the Anthropic API. `tests/test_review_findings.py`, `tests/test_second_review.py` and `tests/test_final_review.py` hold a regression test for each problem found by the three code reviews before submission, and `tests/test_cold_check.py` does the same for two independent checks of the finished version. `ruff check .` passes with the configuration in `ruff.toml`.
 
 ## Checked against the live model
 
@@ -278,5 +278,8 @@ The Docker image was built and run: the container passes its health check, serve
 - Memory keeps one claim reference at a time. Two questions about two different claims asked before verification are both remembered, and answered for the claim named last.
 - The limit on failed identity attempts is per conversation. A new conversation starts a new count, and limiting attempts across conversations would need caller identification that this demo does not have.
 - A policyholder is told which of their details matched ("I've confirmed your full name"), which makes verification easier to complete and also tells a guesser which values were right. A representative is not told. Wrong values are limited by the attempt count.
+- The role question needs an answer in English: an outright statement or a plain yes. A yes in another language, or with words next to it that cannot be placed, is asked again, also when a model is used.
+- A phone number or an email address counts as an identity detail only when it is offered as the caller's own ("my phone is ...", a value on its own, an item in a list of details). Mentioned in any other sentence it is not read, so it neither matches nor counts as a failed attempt.
+- After verification the call goes to a person when the caller says the policy is somebody else's. The usual ways of saying so are recognised, not every one.
 - Sessions live in memory. Email delivery is simulated: the message appears in the Outbox panel.
 - There is no hosted instance. The image runs on any container host and honours `PORT`.

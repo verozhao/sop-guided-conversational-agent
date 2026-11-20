@@ -109,15 +109,17 @@ class VerifyIdPhase(PolicyBase):
             # The answer to "are you the policyholder yourself?". The caller's own words decide,
             # whichever engine read them. Only a yes that points at nobody else opens the gate:
             # "yes, I'm her son" and "yes, for my mother" are not that yes.
+            # A model's yes is never enough on its own, and a model's "representative" always counts.
             answer = role_answer(t.text, m.identity.get("full_name") or "")
-            says_other = answer == "other" or u.affirmation == "no" or own_name or (u.caller_role == "representative" and answer != "self")
-            says_self = answer == "self" or (answer == "none" and (u.affirmation == "yes" or u.caller_role == "policyholder"))
-            if says_other:
+            if answer == "other" or u.affirmation == "no" or own_name:
                 m.caller_role, m.role_guessed, m.role_unclear = "representative", False, False
-            elif says_self:
+            elif answer == "self":
                 m.caller_role, m.role_guessed, m.role_unclear = "policyholder", False, False
+            elif u.caller_role == "representative":
+                m.caller_role, m.role_guessed, m.role_unclear = "representative", False, False
             else:
-                # Another person came up in the answer, or nothing clear was said: ask once more.
+                # Something stood next to the yes that cannot be placed, or nothing clear was said.
+                # It is asked once more, and a second such answer goes to a person.
                 m.caller_role, m.role_guessed, m.role_unclear = "unknown", False, True
         is_rep = self._is_rep(s)
 

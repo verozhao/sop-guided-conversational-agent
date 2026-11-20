@@ -25,15 +25,20 @@ from .common import (
 
 EMAIL_IN_TEXT = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 SUMMARY_AGAIN = re.compile(r"\bre-?send\b|\bsend\s+(?:it|that|the\s+summary)\b|\bsummary\b|\brecap\b|\be-?mail\b", re.I)
+# Another recipient is named by what it is: a different address, another person, another place.
+# "my registered email", "my listed address" and "the one on file" are the address on file.
+_SOMEONE = (
+    r"(?:mother|mom|mum|father|dad|wife|husband|son|daughter|partner|spouse|brother|sister|kids?|child|parents?|family|friend|"
+    r"lawyer|attorney|accountant|doctor|dentist|boss|employer|assistant|secretary|agent|broker|adviser|advisor)"
+)
 OTHER_ADDRESS = re.compile(
-    r"\b(?:different|another|other|new|work|personal|second|alternate|alternative)\s+(?:e-?mail|address|one|account|inbox)\b|"
-    r"\bnot\s+(?:to\s+)?that\s+(?:address|e-?mail|one)\b|\bsomewhere\s+else\b|"
-    # "send it to my son", "to him instead", "cc my lawyer": another recipient
-    r"(?:\b(?:send|e-?mail|mail|forward|deliver|get)\b[^.!?]{0,40}|^\W*)\bto\s+(?:my|our)\s+"
-    r"(?!(?:e-?mail|address|inbox|account|own|usual|regular|normal|primary|main|file)\b)[a-z][\w\-]*|"
-    r"\bto\s+(?:him|her|them|someone\s+else)\b|\b(?:cc|copy)\s+(?:my|him|her|them)\b",
+    r"(?<!no need for )(?<!don't need )(?<!not )\b(?:different|another|other|new|work|personal|business|second|alternate|alternative)\s+"
+    r"(?:e-?mail|address|one|account|inbox)\b|\bnot\s+(?:to\s+)?that\s+(?:address|e-?mail|one)\b|\bsomewhere\s+else\b|"
+    rf"\bto\s+(?:my|our)\s+(?:[\w\-]+\s+)?(?:{_SOMEONE}|work|office|job|company|gmail|yahoo|outlook|hotmail|icloud|phone|whatsapp)\b|"
+    rf"\b(?:cc|copy)\s+(?:my\s+(?:[\w\-]+\s+)?{_SOMEONE}|him|her|them)\b|\bto\s+someone\s+else\b",
     re.I,
 )
+OTHER_PERSON = re.compile(r"\bto\s+(?:him|her|them)\b", re.I)  # for a representative, "her" is the policyholder
 
 
 class PostProcessPhase(PolicyBase):
@@ -214,7 +219,9 @@ class PostProcessPhase(PolicyBase):
         typed = EMAIL_IN_TEXT.search(t.text)
         other = u.identity.get("email", "") or (typed.group(0).lower() if typed else "")
         on_file = {party.email.lower(), *(a.lower() for a in party.email_aliases)} if party else set()
-        return bool(other and other.lower() not in on_file) or bool(OTHER_ADDRESS.search(t.text))
+        if other and other.lower() not in on_file:
+            return True
+        return bool(OTHER_ADDRESS.search(t.text)) or (bool(OTHER_PERSON.search(t.text)) and not self._is_rep(s))
 
     def _closed(self, s: Session, u: Understanding, t: TurnCtx) -> Directive | None:
         target = email_target(s, self.data)

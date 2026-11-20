@@ -32,8 +32,9 @@ SAYS_THIRD_PARTY = [
     "I have power of attorney for her", "well, I'm her husband", "Yes I'm David, her son", "yeah I'm the one who handles her stuff",
     "yes on her behalf", "sure, I'm her guardian", "yes - I'm her legal guardian", "I'm the account holder's son",
     "yes, I'm the son of the policyholder", "Yes, I'm her POA", "yes, for my mother", "it's her policy", "yes it's hers", "I'm David Chen",
+    "Yes, I'm David",
 ]
-MENTIONS_SOMEONE = ["she's my mother", "yes, she's my mom", "of course, she is my mother", "yes, my husband just dialed for me", "Yes, I'm David", "yes im david"]
+MENTIONS_SOMEONE = ["she's my mother", "yes, she's my mom", "of course, she is my mother", "yes, my husband just dialed for me", "yes im david"]
 PLAIN_YES = ["yes", "Yes, I am", "it's mine", "Yes, it's my own policy.", "This is she.", "I'm Margaret", "obviously", "Yes. Why was it denied?"]
 
 
@@ -75,7 +76,7 @@ def test_a_plain_yes_still_opens_the_gate(convo: Convo, answer: str):
         ("yes", {"affirmation": "no"}, False),
         ("Yes, it's my own policy.", {"caller_role": "representative", "affirmation": "yes"}, True),
         ("yep that would be me", {"caller_role": "policyholder", "affirmation": "yes"}, True),
-        ("si, soy yo", {"caller_role": "policyholder", "affirmation": "yes"}, True),
+        ("si, soy yo", {"caller_role": "policyholder", "affirmation": "yes"}, False),  # a model's yes alone is asked again
     ],
 )
 def test_the_callers_words_decide_at_the_role_question_whatever_the_model_reads(agent: Agent, text: str, model_reading: dict, verified: bool):
@@ -264,3 +265,177 @@ def test_after_closing_a_model_reading_with_another_address_sends_nothing(agent:
     )
     reply = c.say("actually send the summary to dchen@work.com")
     assert c.s.outbox == [] and c.act == "EMAIL_ADDRESS_FIXED" and "dchen@work.com" not in reply
+
+
+# ================================================================ the second check, on the fixes above
+#
+# One reviewer attacked the fixed gates and still got through with other wordings. Another looked
+# for genuine callers the fixes now blocked, and found some. Both came from lists of phrasings.
+# The rules are structural now: a yes is defined by what it may contain, a contact detail counts
+# only when it is offered as the caller's own, and statements after verification are read against
+# the verified name.
+
+MOTHERS_CLAIM = "Hi, I have a question about my mother's claim. The name is Margaret Chen, DOB 1985-03-15, SSN last four 4472."
+HUSBAND_TOLD = "My husband told me to call about my denied claim. Margaret Chen, born 1985-03-15, SSN last four 4472."
+NOT_A_PLAIN_YES = [
+    "Yes, I'm the policyholder's secretary", "Yes, it's David Chen", "yes David Chen speaking", "Yes it's David", "Yes, David speaking",
+    "yes, David here", "Yes, Dave", "Yes, on Margaret's behalf", "yes, I work for Margaret", "yes, I work for Mrs. Chen", "yes, I'm with Margaret",
+    "Yes, I'm Margaret's secretary", "Yes, I'm Margaret's hubby", "Yes, I'm Margaret's caretaker", "Yes, I'm the caretaker",
+    "yes, I'm the account holder's assistant", "yes, I'm a family member", "Yes, family", "yes I'm the beneficiary",
+    "yes, the policy belongs to Margaret", "yes, Margaret is the policyholder", "yes, the hubby", "Yes, s\u00ed, soy su hijo", "yes, ich bin ihr Sohn",
+    "Yes, I'm the son", "the son", "I'm her grandkid", "Yes, I'm her nurse", "Correct, the nurse", "I'm the caretaker", "I work for Margaret",
+]
+
+
+@pytest.mark.parametrize("answer", NOT_A_PLAIN_YES)
+def test_a_yes_with_anything_else_in_it_never_opens_the_gate(agent: Agent, answer: str):
+    # The consent scenario that never approves: David Chen is the listed representative, and with
+    # an approved consent he would rightly get the claim on the next turn.
+    convo = Convo(agent, scenario="timeout")
+    convo.say(MOTHERS_CLAIM)
+    assert convo.act == "ROLE_CHECK"
+    reply = convo.say(answer)
+    assert not convo.s.verified
+    assert_no_leak(reply)
+    reply = convo.say("why was the healthcare claim denied?")
+    assert not convo.s.verified
+    assert_no_leak(reply)
+
+
+@pytest.mark.parametrize("answer", NOT_A_PLAIN_YES)
+@pytest.mark.parametrize("model_reading", [{"caller_role": "representative", "affirmation": "yes"}, {"caller_role": "policyholder", "affirmation": "yes"}, {"affirmation": "yes"}])
+def test_a_models_yes_does_not_open_the_gate_for_such_an_answer(agent: Agent, answer: str, model_reading: dict):
+    readings = [reading(identity={"full_name": "Margaret Chen", "dob": "1985-03-15", "id_last4": "4472"}), reading(**model_reading)]
+    c = Convo(agent, llm=ScriptedLLM(on_json=lambda *_: readings.pop(0), on_text=lambda *_: "Thank you."))
+    c.say(MOTHERS_CLAIM)
+    reply = c.say(answer)
+    assert not c.s.verified
+    assert_no_leak(reply)
+
+
+@pytest.mark.parametrize("first", ["Yes, I'm the son", "the son", "I'm her grandkid", "Yes, I'm her nurse", "Yes, I'm David"])
+def test_a_later_yes_does_not_undo_i_am_someone_else(convo: Convo, first: str):
+    convo.run(MOTHERS_CLAIM, first, "yes")
+    assert not convo.s.verified and convo.s.memory.caller_role == "representative"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["Yes, I'm the policyholder. My husband is covered under my plan.", "Yes, I am the policyholder. My husband is only a dependant on my plan.",
+     "Yes, I'm the policyholder. My husband just reminded me, that's all.", "yes, I'm the policyholder, not my husband",
+     "yes, it's my own policy. she's my dependant.", "Yes, it's me, Margaret. He's not on the call.", "yes, me", "That's right", "Correct, it's me",
+     "yep, I'm the account holder", "yes, my name is on the policy", "yes I'm calling for myself", "Yes, I'm the policyholder myself.", "yep that would be me"],
+)
+def test_saying_outright_that_one_is_the_policyholder_opens_the_gate_even_with_a_relative_in_the_sentence(convo: Convo, answer: str):
+    convo.say(HUSBAND_TOLD)
+    convo.say(answer)
+    assert convo.s.verified and convo.s.memory.caller_role == "policyholder"
+
+
+@pytest.mark.parametrize(
+    "opening",
+    ["Margaret Chen, DOB 1985-03-15, SSN last four 4472. I'm her secretary.", "Margaret Chen, DOB 1985-03-15, SSN last four 4472. I'm her nurse.",
+     "Margaret Chen, DOB 1985-03-15, SSN last four 4472. I'm calling from her doctor's office.", "Margaret Chen, DOB 1985-03-15, SSN last four 4472. I'm the hubby.",
+     "Margaret Chen, DOB 1985-03-15, SSN last four 4472. I'm the executor of her estate.", "I'm Margaret Chen's secretary. DOB 1985-03-15, SSN last four 4472."],
+)
+def test_an_opening_that_says_who_the_caller_is_does_not_open_the_gate(convo: Convo, opening: str):
+    reply = convo.say(opening)
+    assert not convo.s.verified and convo.act in {"ROLE_CHECK", "ASK_REP_NAME"}
+    assert_no_leak(reply)
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["Mom is the policyholder, I'm just helping.", "My mum's the policyholder, I'm just helping.", "the policyholder is my mom.",
+     "My mother Margaret is the policyholder.", "The policy is my mom's.", "It belongs to my mother.", "Actually I'm Margaret's son.",
+     "I'm calling on behalf of Margaret Chen.", "I should say I'm David Chen, her son.", "I'm not Margaret, I'm David.", "Margaret is my mother, I'm David.",
+     "By the way, I'm her secretary.", "I'm Margaret's caretaker.", "I work for Mrs. Chen.", "I'm doing this for my mother."],
+)
+def test_after_verification_more_ways_of_saying_it_is_someone_elses_policy(convo: Convo, line: str):
+    convo.say(THREE_DETAILS)
+    reply = convo.say(line + " Why was the healthcare claim denied?")
+    assert convo.s.phase == ESCALATED and "pathology" not in reply
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["My husband is the insured driver on the auto claim, what's the status of CL-2102?",
+     "I'm the policyholder, my husband is the insured on the auto policy. what's happening with CL-2102?",
+     "He's the owner of the car, I'm the policyholder. What's the status of CL-2102?",
+     "my husband is the member on the dental plan through work, but this claim is mine. why was CL-2048 denied?",
+     "I'm helping my mother with her bills too, but this one is mine. Why was CL-2048 denied?",
+     "I work for the city, does that change anything about CL-2048?"],
+)
+def test_after_verification_relatives_on_the_callers_own_policy_change_nothing(convo: Convo, line: str):
+    convo.say(THREE_DETAILS)
+    convo.say(line)
+    assert convo.s.phase != ESCALATED and convo.s.verified
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["I got an email from jsmith@insurer.com about the denial", "I tried calling 800-555-0100 but it's busy", "the number on the denial letter is 800-555-0100",
+     "I called you from 650-555-1234 yesterday", "the nurse's number is 650-555-1234", "my case manager's email is jlee@insurer.com",
+     "the referral came from dr.patel@clinic.org", "the billing number on the bill is 800-555-0100", "my emergency contact is 650-555-1234",
+     "my dentist, Dr Wu, her email is wu@dental.com"],
+)
+def test_a_contact_detail_that_is_not_offered_as_the_callers_own_is_not_read(convo: Convo, line: str):
+    convo.say("My name is Margaret Chen. I'm calling about my denied claim.")
+    convo.say(line)
+    assert convo.s.failed_attempts == 0 and "email" not in convo.s.memory.identity and "phone" not in convo.s.memory.identity
+
+
+@pytest.mark.parametrize(
+    "line, field",
+    [("my work email is margaret@email.com", "email"), ("contact me at margaret@email.com", "email"), ("my cell is 650-521-2836", "phone"),
+     ("the office number on my policy is 650-521-2836", "phone"), ("text me at 650-521-2836", "phone"), ("the email I signed up with is margaret@email.com", "email"),
+     ("margaret@email.com", "email"), ("650-521-2836", "phone"), ("phone 650.521.2836 and email margaret@email.com", "email"),
+     ("yes it's 650 521 2836", "phone"), ("my number is 6505212836", "phone")],
+)
+def test_a_contact_detail_offered_as_the_callers_own_is_read(convo: Convo, line: str, field: str):
+    convo.say("My name is Margaret Chen.")
+    convo.say(line)
+    assert field in convo.s.verification["matched"]
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [["No, I'm her son", "David", "Chen, C H E N"], ["Yes I'm David, her son", "Chen"], ["Yes I'm David, her son", "My surname is Chen"],
+     ["no, I'm her son", "I'm David Chen"], ["nope, it's David Chen"]],
+    ids=["first name, then surname spelled", "surname alone", "my surname is", "full name", "it's full name"],
+)
+def test_the_listed_representative_can_give_his_name_in_pieces(convo: Convo, lines: list[str]):
+    convo.say(MOM_ASKED)
+    for line in lines:
+        convo.say(line)
+    assert convo.act == "CONSENT_REQUESTED" and convo.s.memory.representative_name == "David Chen" and not convo.s.verified
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["yes, send it to my registered email", "yes, send it to my listed email", "yes, email it to my existing address", "yes, send it to my margaret@email.com",
+     "Yes, send it to my email on file", "yes, send it to me"],
+)
+def test_a_yes_that_names_the_address_on_file_sends_the_summary(convo: Convo, line: str):
+    convo.run(DEMO_UTTERANCE, "that's all")
+    convo.say(line)
+    assert len(convo.s.outbox) == 1 and convo.act == "EMAIL_SENT"
+
+
+def test_a_representative_asking_to_send_it_to_her_means_the_address_on_file(convo: Convo):
+    convo.run("Hi, I'm David, I'm calling for my mother about her denied claim.", "Her name is Margaret Chen, date of birth March 15 1985, last four of her social 4472.",
+              "Chen. David Chen.", "she approved it", "why was it denied?", "that's all")
+    assert convo.act == "EMAIL_OFFER"
+    convo.say("yes, send it to her please")
+    assert len(convo.s.outbox) == 1
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ["Please make sure your appeal is submitted before March 18, 2026.", "If the denial is overturned on review, the plan pays up to $1,450.00.",
+     "If the decision is reversed, the plan pays up to $1,450.00.", "Once the denial is reversed, the allowed maximum is $1,450.00.",
+     "Make sure the appeal is filed by March 18, 2026.", "Net pay is $0.00 for now. The allowed maximum is $1,450.00 if the denial is reversed on review."],
+)
+def test_an_outcome_inside_a_condition_or_an_instruction_is_released(agent: Agent, reply: str):
+    verdict = _verdict(agent, reply)
+    assert verdict.ok, verdict.violations

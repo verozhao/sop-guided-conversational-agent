@@ -259,6 +259,26 @@ _REPORTED_RE = re.compile(
 )
 
 
+# "If the denial is overturned ...", "Make sure the appeal is filed by ...": a condition or an
+# instruction earlier in the same sentence means the outcome is not being reported.
+_SENTENCE_CONDITION_RE = re.compile(
+    r"\b(?:if|once|when|whenever|after|until|unless|whether|should|provided|assuming|in\s+case|before|make\s+sure|be\s+sure|ensure|"
+    r"please|needs?\s+to|have\s+to|has\s+to|must|important|remember|so\s+that|in\s+order)\b",
+    re.I,
+)
+
+
+def _stated(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
+    """Like _asserted, and a condition or instruction anywhere earlier in the sentence also softens."""
+    for match in pattern.finditer(text):
+        sentence_start = max(text.rfind(mark, 0, match.start()) for mark in ".!?;:") + 1
+        before = text[sentence_start: match.start()]
+        if _negated(before, match.group(0)) or _DOUBTED_RE.search(before) or _SENTENCE_CONDITION_RE.search(before):
+            continue
+        return match
+    return None
+
+
 def claims_verified(text: str) -> bool:
     for match in _VERIFIED_RE.finditer(text):
         before = text[max(0, match.start() - 90): match.start()]
@@ -422,10 +442,10 @@ def check_reply(reply: str, *, session: Session, directive: Directive, data: Cla
         status = _asserted(_STATUS_OF_CLAIM_RE, text)
         if status and (status.group(1) or status.group(2)).lower() not in allowed_low:
             result.fail(f"states a claim status the facts do not give: {status.group(1) or status.group(2)}")
-        outcome = _asserted(_OUTCOME_RE, text)
+        outcome = _stated(_OUTCOME_RE, text)
         if outcome and (outcome.group(1) or outcome.group(2)).lower().replace("re-", "re") not in allowed_low:
             result.fail(f"states an outcome the facts do not give: '{outcome.group(0)}'")
-        filed = _asserted(_FILED_RE, text)
+        filed = _stated(_FILED_RE, text)
         if filed and not directive.facts.get("handoff"):
             result.fail(f"claims an action the assistant cannot take: '{filed.group(0)}'")
 
