@@ -146,6 +146,8 @@ class PostProcessPhase(PolicyBase):
         choice = u.email_summary_choice
         if choice == "none" and s.pending == "email_offer" and u.affirmation != "none" and not u.process_question:
             choice = "send" if u.affirmation == "yes" else "skip"
+        if choice == "none" and s.pending == "email_offer" and self._typed_address_on_file(s, t):
+            choice = "send"  # they answered the offer with the address it would go to
         if self._elsewhere(s, u, t) and choice != "skip":
             s.pending = "email_offer"
             return self._directive(
@@ -213,6 +215,16 @@ class PostProcessPhase(PolicyBase):
             must_not=["Do not send or claim to have sent anything yet."],
         )
 
+    def _typed_address_on_file(self, s: Session, t: TurnCtx) -> bool:
+        """The caller typed the address on file, with nothing that questions or declines it."""
+        party = self.data.party(s.party_id)
+        typed = EMAIL_IN_TEXT.search(t.text)
+        if not party or not typed or "?" in t.text:
+            return False
+        on_file = {party.email.lower(), *(a.lower() for a in party.email_aliases)}
+        declines = re.search(r"\b(?:no|not|don't|do\s+not|never|skip|stop|wrong|old|change|changed|different|instead|remove|delete|update|isn't|cancel)\b", t.text, re.I)
+        return typed.group(0).lower() in on_file and not declines
+
     def _elsewhere(self, s: Session, u: Understanding, t: TurnCtx) -> bool:
         """The caller wants the summary to go somewhere other than the address on file."""
         party = self.data.party(s.party_id)
@@ -221,6 +233,8 @@ class PostProcessPhase(PolicyBase):
         on_file = {party.email.lower(), *(a.lower() for a in party.email_aliases)} if party else set()
         if other and other.lower() not in on_file:
             return True
+        if other:
+            return False  # they typed the address on file, whatever they call it
         return bool(OTHER_ADDRESS.search(t.text)) or (bool(OTHER_PERSON.search(t.text)) and not self._is_rep(s))
 
     def _closed(self, s: Session, u: Understanding, t: TurnCtx) -> Directive | None:

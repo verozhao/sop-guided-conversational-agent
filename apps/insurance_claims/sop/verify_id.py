@@ -13,15 +13,16 @@ listed on the policy and the policyholder has approved).
 
 from __future__ import annotations
 
+import difflib
 import re
 from typing import Any
 
 from sop_harness.core import Directive
 
-from ..nlu_rules import role_answer
-from ..normalize import join_items
+from ..nlu_rules import POLICYHOLDER_RE, holder_names, role_answer, said_to_be_someone_else
+from ..normalize import join_items, names_match
 from ..state import RESOLVE_INTENT, Session
-from ..understanding import Understanding
+from ..understanding import MENTIONS_OTHER_RE, Understanding
 from ..verification import PII_FIELDS, REQUIRED_MATCHES, verify_identity
 from .common import (
     CONSENT_FACTS,
@@ -103,23 +104,38 @@ class VerifyIdPhase(PolicyBase):
         s.verification = result.summary()
         s.identity_ok = result.verified
         s.party_id = result.record.party_id if result.verified and result.record else None
-        holder_name = (m.identity.get("full_name") or "").lower()
-        own_name = bool(m.representative_name) and m.representative_name.lower() != holder_name
+        # Every name the policyholder goes by. A name the caller gives as their own is somebody
+        # else's only when it is none of them.
+        known = holder_names(self.data, s.candidate_id, m.identity.get("full_name") or "")
+        stated_before = False
+        if result.verified and not s.verified:
+            # The record is known now. Did the caller say earlier, in so many words, that they are
+            # somebody else ("David here.", "I work for Margaret")? Then no yes makes them the policyholder.
+            for entry in s.history:
+                if entry["role"] != "caller":
+                    continue
+                stated_before, name = said_to_be_someone_else(entry["text"], known)
+                if stated_before:
+                    if name and not m.representative_name:
+                        m.representative_name = name
+                    break
+            if stated_before:
+                m.caller_role, m.role_guessed, m.role_unclear = "representative", False, False
+        own_name = bool(m.representative_name) and not any(names_match(m.representative_name, name) for name in known)
         if s.pending == "role_check":
             # The answer to "are you the policyholder yourself?". The caller's own words decide,
             # whichever engine read them. Only a yes that points at nobody else opens the gate:
             # "yes, I'm her son" and "yes, for my mother" are not that yes.
             # A model's yes is never enough on its own, and a model's "representative" always counts.
-            answer = role_answer(t.text, m.identity.get("full_name") or "")
-            if answer == "other" or u.affirmation == "no" or own_name:
+            answer = role_answer(t.text, known)
+            said_other = answer == "other" or own_name or stated_before
+            if said_other or (u.source == "llm" and answer != "self" and (u.affirmation == "no" or u.caller_role == "representative")):
                 m.caller_role, m.role_guessed, m.role_unclear = "representative", False, False
-            elif answer == "self":
+            elif answer == "self" and not (u.source == "llm" and u.affirmation == "no"):
                 m.caller_role, m.role_guessed, m.role_unclear = "policyholder", False, False
-            elif u.caller_role == "representative":
-                m.caller_role, m.role_guessed, m.role_unclear = "representative", False, False
             else:
-                # Something stood next to the yes that cannot be placed, or nothing clear was said.
-                # It is asked once more, and a second such answer goes to a person.
+                # Something stood next to the yes that cannot be placed, the answer said both, or
+                # nothing clear was said. It is asked again, and after that a person takes over.
                 m.caller_role, m.role_guessed, m.role_unclear = "unknown", False, True
         is_rep = self._is_rep(s)
 
@@ -128,7 +144,10 @@ class VerifyIdPhase(PolicyBase):
                 # Taken for a representative from wording alone: ask before treating them as one.
                 return self._role_check(s, t)
             if not is_rep:
-                if m.role_unclear and m.caller_role == "unknown":
+                if m.caller_role == "unknown" or m.role_unclear:
+                    # Three details say whose policy it is. They do not say who is calling. That is
+                    # asked, unless the caller has said outright that they are the policyholder
+                    # and no other person has come up since.
                     return self._role_check(s, t)
                 self._grant(s, t, "three identity details matched one policyholder record")
                 return None
@@ -140,8 +159,9 @@ class VerifyIdPhase(PolicyBase):
         alternatives = [f for f in remaining if f not in result.conflicts and f not in result.incomplete]
         # A third party is never shown which of the details they gave were right. For them the
         # choice is always the whole list, and nothing is named as noted or confirmed.
-        offer = [f for f in PII_FIELDS if f not in m.declined] if is_rep else remaining
-        shown = [] if is_rep else matched
+        discreet = is_rep or m.role_unclear  # another person came up: say how many, never which
+        offer = [f for f in PII_FIELDS if f not in m.declined] if discreet else remaining
+        shown = [] if discreet else matched
         new_pii = [f for f in t.new_identity if f in PII_FIELDS]
         who = "the policyholder's identity" if is_rep else "your identity"
         facts: dict[str, Any] = {
@@ -175,7 +195,7 @@ class VerifyIdPhase(PolicyBase):
             else []
         )
         rep_rules: list[str] = []
-        if is_rep:
+        if discreet:
             # A third party is not told which of the details they supplied were right.
             facts["verification"].pop("details_confirmed_so_far")
             rep_rules = [
@@ -216,18 +236,18 @@ class VerifyIdPhase(PolicyBase):
                     act="VERIFY_LOCKED",
                 )
             bad = [SHORT_LABELS[f] for f in result.conflicts]
-            if is_rep:
+            if discreet:
                 text = "One or more of the details you gave don't match our records."
             elif result.record is None:
                 text = "I wasn't able to find a match with the details you gave me."
-            elif matched:
+            elif shown:
                 text = (
-                    f"I've confirmed {self._labels(s, matched)}, but I wasn't able to match the "
+                    f"I've confirmed {self._labels(s, shown)}, but I wasn't able to match the "
                     f"{join_items(bad)} you gave me with our records."
                 )
             else:
                 text = f"I wasn't able to match the {join_items(bad)} you gave me with our records."
-            if is_rep:
+            if discreet:
                 text += " Could you double-check them, or give me a different detail instead?"
             else:
                 text += " Could you double-check that"
@@ -237,7 +257,7 @@ class VerifyIdPhase(PolicyBase):
             if left == 1:
                 text += " For your security, I can try this one more time before I pass you to a representative."
             facts["verification"]["attempts_left"] = left
-            if is_rep:
+            if discreet:
                 goal = "One or more details the caller gave do not match the records. Say so without saying which, and ask them to re-check or use a different detail."
                 first_point = "Say that one or more details did not match. Do not say which matched and which did not."
             else:
@@ -438,31 +458,50 @@ class VerifyIdPhase(PolicyBase):
         )
 
     def _role_check(self, s: Session, t: TurnCtx) -> Directive:
-        """The details match, but the caller mentioned somebody else and never said who is calling.
+        """The details match. They say whose policy it is, and never who is calling, so that is asked.
 
         A policyholder answers yes and goes on. Anyone else goes through the representative gate.
+        An answer that is neither is asked again twice, each time for a plain yes or no, and then
+        a person takes over.
         """
         asked = s.pending == "role_check"
         if asked:
             s.role_checks += 1
-            if s.role_checks >= 2:
+            if s.role_checks >= 3:
                 return self._escalate(
                     s, t, "it could not be established whether the caller is the policyholder",
                     lead="I'm sorry, I couldn't tell whether you are the policyholder, so a person needs to take it from here.",
                 )
         s.pending = "role_check"
-        text = (
-            "I ask because claim details can only go to the policyholder or to someone the policyholder has approved, "
-            "and I couldn't tell which you are. Are you the policyholder yourself? A yes or no is enough."
-            if asked
-            else "Thank you, those details check out. One question before I go on: are you the policyholder yourself?"
-        )
+        if not asked:
+            text = "Thank you, those details check out. One question before I go on: are you the policyholder yourself?"
+        elif s.role_checks == 1:
+            # A yes with somebody else in the same answer is asked about once more, and told why.
+            why = (
+                "Thank you. You mentioned someone else as well, so I need to be sure who I'm speaking with."
+                if MENTIONS_OTHER_RE.search(t.text)
+                else "Sorry, I couldn't tell from your answer who I'm speaking with."
+            )
+            text = (
+                f"{why} Claim details can only go to the policyholder or to someone the policyholder has approved. "
+                "Could you answer with just yes or no: are you the policyholder yourself?"
+            )
+        else:
+            text = "Sorry, I still need just a yes or a no before I can go on: are you the policyholder yourself?"
         return self._directive(
             s, t, "ROLE_CHECK",
-            goal="The details match, but it is unclear whether the caller is the policyholder or someone calling for them. Ask, and say nothing about any claim.",
+            goal=(
+                "The caller's last answer did not say plainly whether they are the policyholder. Say why it matters, and ask for a plain yes or no. Say nothing about any claim."
+                if asked
+                else "The details match. Before anything is shared, ask whether the caller is the policyholder themselves. Say nothing about any claim."
+            ),
             fallback=text,
             facts={"why_this_is_asked": "Claim details go to the policyholder, or to a representative the policyholder has approved."},
-            cover=["Say the details check out.", "Ask one question: whether the caller is the policyholder themselves."],
+            cover=(
+                ["Say that claim details can only go to the policyholder or someone the policyholder has approved.", "Ask for a plain yes or no: is the caller the policyholder themselves?"]
+                if asked
+                else ["Say the details check out.", "Ask one question: whether the caller is the policyholder themselves."]
+            ),
             rules=REP_GATE_RULES,
         )
 
@@ -473,12 +512,14 @@ class VerifyIdPhase(PolicyBase):
         details check out and that a consent request went out, and nothing else that is on file.
         """
         m = s.memory
+        known = holder_names(self.data, s.candidate_id, m.identity.get("full_name") or "")
         same_person = "self_is_holder" in u.guessed or (
-            bool(m.representative_name) and m.representative_name.lower() == (m.identity.get("full_name") or "").lower()
+            bool(m.representative_name) and any(names_match(m.representative_name, name) for name in known)
         )
-        if m.role_guessed and same_person and not s.rep_denials:
-            # They were taken for a representative from a turn of phrase, and the name they give
-            # as their own is the policyholder's. Ask, instead of refusing them as not listed.
+        if same_person and not s.rep_denials and (m.role_guessed or "full_name" not in m.identity):
+            # They were taken for a representative from a turn of phrase, or the only name they
+            # ever gave is their own and it is the policyholder's ("I'm calling for my wife, my
+            # name is ..."). Ask, instead of refusing them as not listed.
             m.caller_role, m.role_guessed, m.role_unclear, m.representative_name = "unknown", False, True, ""
             return self._role_check(s, t)
         holder = self._holder(s)
@@ -502,7 +543,37 @@ class VerifyIdPhase(PolicyBase):
             # No name yet, or only a first name ("I'm David, her son"). The list of authorized
             # representatives holds full names, so a first name is asked about, never refused.
             asked_before = s.pending == "rep_name"
+            gave_holders_name = asked_before and (same_person or any(names_match(t.text, name) for name in known))
+            claims_policy = asked_before and (u.caller_role == "policyholder" or bool(POLICYHOLDER_RE.search(t.text)))
+            if claims_policy or (gave_holders_name and s.rep_same_name):
+                # They were sent here as someone calling for the policyholder and now say they are
+                # the policyholder. A person sorts that out. Nothing loops and nothing opens.
+                return self._escalate(
+                    s, t, "the caller's statements about who is calling conflict",
+                    lead="I'm sorry, I have conflicting information about who is calling, so a person needs to take it from here.",
+                )
+            if asked_before:
+                s.rep_name_turns += 1
+                if s.rep_name_turns >= 5:
+                    return self._escalate(
+                        s, t, "the caller's own name could not be established",
+                        lead="I'm sorry, I wasn't able to get your name, so a person needs to take it from here.",
+                    )
             s.pending = "rep_name"
+            if gave_holders_name:
+                s.rep_same_name = True
+                facts["representative"] = {**CONSENT_FACTS, "why_the_callers_name_is_needed": REP_NAME_WHY}
+                return self._directive(
+                    s, t, "ASK_REP_NAME",
+                    goal="The caller said they are calling for someone else, and gave the policyholder's name as their own. Say so, and ask for their own name.",
+                    fallback=(
+                        f"That is the name of the policyholder. You told me you are calling for {holder}, so I need your own "
+                        f"first and last name."
+                    ),
+                    facts=facts,
+                    cover=["Say that the name they gave is the policyholder's.", "Ask for the caller's own full name, first and last."],
+                    rules=REP_GATE_RULES,
+                )
             facts["representative"] = {**CONSENT_FACTS, "why_the_callers_name_is_needed": REP_NAME_WHY}
             pushing = u.refuses_verification or "full_name" in u.declined_fields or (asked_before and u.affirmation == "no")
             if pushing:
@@ -554,6 +625,13 @@ class VerifyIdPhase(PolicyBase):
             )
 
         rep_first = m.representative_name.split()[0]
+        corrected = (
+            bool(s.rep_name_refused)
+            and difflib.SequenceMatcher(None, s.rep_name_refused.lower(), m.representative_name.lower()).ratio() >= 0.85
+            and self.data.find_representative(s.party_id, m.representative_name) is not None
+        )
+        if corrected:
+            s.rep_name_refused, s.rep_denials = "", 0  # "Davd Chen", then "sorry, David Chen": a typo, not another person
         if s.rep_name_refused and s.rep_name_refused.lower() != m.representative_name.lower():
             # Told they are not on the policy, the caller now gives another name.
             return self._escalate(

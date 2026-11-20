@@ -66,6 +66,8 @@ class Session:
     name_misses: int = 0
     rep_name_refused: str = ""         # a representative name that was not on the policy
     role_checks: int = 0               # times "are you the policyholder yourself?" was asked
+    rep_name_turns: int = 0            # turns at "what is your own name?" that brought no name
+    rep_same_name: bool = False        # a representative gave the policyholder's name as their own once
     refusal_count: int = 0
     rep_denials: int = 0
     consent: dict[str, Any] = field(

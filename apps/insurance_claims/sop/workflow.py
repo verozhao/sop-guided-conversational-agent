@@ -29,7 +29,7 @@ from typing import Callable
 from sop_harness.core import Directive, PhaseGraph, ToolRegistry, TurnTrace
 
 from ..data import ClaimsData
-from ..nlu_rules import states_third_party
+from ..nlu_rules import says_policyholder, states_third_party
 from ..state import (
     CLOSED,
     ESCALATED,
@@ -164,6 +164,11 @@ class InsuranceSOP(VerifyIdPhase, ResolveIntentPhase, ProcessCasePhase, PostProc
         if not s.verified:
             already_matched = set(s.verification.get("matched", []))
             holder = (m.identity.get("full_name") or "").lower()
+            if u.source == "llm" and u.caller_role == "policyholder" and not says_policyholder(t.text):
+                # A model's reading may make the gate stricter, never looser. Only the caller's own
+                # outright statement counts as "I am the policyholder". What a model infers from
+                # the wording is asked about with the role question.
+                u.caller_role = "unknown"
             if u.source == "llm" and u.caller_role == "representative" and not states_third_party(t.text):
                 # The model concluded this from the wording ("my husband told me to call"). The
                 # caller did not say it, so it is settled with the role question, not assumed.
@@ -211,11 +216,15 @@ class InsuranceSOP(VerifyIdPhase, ResolveIntentPhase, ProcessCasePhase, PostProc
                     captured.append(f"declined.{name}")
                 if name in m.identity and name not in u.identity and name not in already_matched:
                     del m.identity[name]  # the caller withdrew a value given earlier
-            # The cue is taken from the caller's own words, so the model path gets it too.
-            if (u.mentions_other or (u.caller_role == "unknown" and MENTIONS_OTHER_RE.search(t.text))) and m.caller_role == "unknown":
-                m.role_unclear = True
-            if u.caller_role != "unknown":
-                m.role_unclear = False
+            # Another person came up. Whatever was said before, who is calling is then asked at the
+            # gate. Only an outright "I'm the policyholder" in a message that mentions nobody else,
+            # or the answer to that question, settles it. The cue is read from the caller's own
+            # words, so the model path gets it too.
+            if s.pending != "role_check":
+                if u.caller_role == "policyholder":
+                    m.role_unclear = False
+                elif u.mentions_other or MENTIONS_OTHER_RE.search(t.text):
+                    m.role_unclear = True
             if u.caller_role != "unknown" and u.caller_role != m.caller_role:
                 inferred = "caller_role" in u.guessed
                 if m.caller_role == "representative" and (not m.role_guessed or acted_as_rep):

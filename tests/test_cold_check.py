@@ -32,9 +32,16 @@ SAYS_THIRD_PARTY = [
     "I have power of attorney for her", "well, I'm her husband", "Yes I'm David, her son", "yeah I'm the one who handles her stuff",
     "yes on her behalf", "sure, I'm her guardian", "yes - I'm her legal guardian", "I'm the account holder's son",
     "yes, I'm the son of the policyholder", "Yes, I'm her POA", "yes, for my mother", "it's her policy", "yes it's hers", "I'm David Chen",
-    "Yes, I'm David",
+    "Yes, I'm David", "she's my mother", "yes, she's my mom", "of course, she is my mother", "it's me David", "it's me, the daughter",
+    "yes Margaret is here", "Friend of Margaret here.", "I'm the policyholder. Well, actually my mother is", "yes, mine. well my wife's",
+    "yes, I'm Margaret Chen Jr",
 ]
-MENTIONS_SOMEONE = ["she's my mother", "yes, she's my mom", "of course, she is my mother", "yes, my husband just dialed for me", "yes im david"]
+# Neither a yes nor a no. "I'm her mother" is what a policyholder says about a child on her plan,
+# and what a parent says who calls for a grown child, so it is asked again and never guessed.
+MENTIONS_SOMEONE = [
+    "yes, my husband just dialed for me", "yes im david", "I'm her mother", "yes, he's my son", "Yes, I'm calling for my daughter",
+    "I'm the other insured", "yes, I'm on the policy too", "I'm the former policyholder", "yes mr chen here",
+]
 PLAIN_YES = ["yes", "Yes, I am", "it's mine", "Yes, it's my own policy.", "This is she.", "I'm Margaret", "obviously", "Yes. Why was it denied?"]
 
 
@@ -52,8 +59,10 @@ def test_a_yes_that_mentions_another_person_is_asked_again_never_accepted(convo:
     convo.say(MOM_ASKED)
     reply = convo.say(answer)
     assert convo.act == "ROLE_CHECK" and not convo.s.verified and "yes or no" in reply
+    reply = convo.say(answer)
+    assert convo.act == "ROLE_CHECK" and not convo.s.verified and "a yes or a no" in reply
     convo.say(answer)
-    assert convo.s.phase == ESCALATED and not convo.s.verified  # a second unclear answer goes to a person
+    assert convo.s.phase == ESCALATED and not convo.s.verified  # after two more tries a person takes over
 
 
 @pytest.mark.parametrize("answer", PLAIN_YES)
@@ -94,15 +103,29 @@ def test_the_role_answer_reading():
     holder = "Margaret Chen"
     assert role_answer("it's her policy", holder) == "other"
     assert role_answer("this is her husband", holder) == "other"
-    assert role_answer("It's Margaret Chen's policy", holder) == "third"
+    assert role_answer("It's Margaret Chen's policy", holder) == "unclear"
     assert role_answer("This is she.", holder) == "self"
-    assert role_answer("I'm not sure what you mean", holder) == "none"
+    assert role_answer("I'm not sure what you mean", holder) == "unclear"
+    # exactly the statement, or it is not one
+    assert role_answer("I'm the policyholder", holder) == "self"
+    for almost in ("I'm the other insured", "I'm the former policyholder", "I'm Margaret Chen Jr", "I'm his wife and the policyholder", "I'm the patient",
+                   "I'm on the policy too", "I'm the insured driver", "Right now I just need the claim status", "Sure, why was it denied?"):
+        assert role_answer(almost, holder) == "unclear", almost
+    # said outright that it is somebody else: no later yes undoes these
+    for other in ("it's me David", "yes Margaret is here", "I'm the policyholder. Well, actually my mother is", "I work for Margaret", "No."):
+        assert role_answer(other, holder) == "other", other
+    # every name the policyholder goes by counts as their own
+    assert role_answer("Yes, I'm Margaret Chen", ["", "Margaret Chen"]) == "self"
+    assert role_answer("Yes, I'm David Chen", ["", "Margaret Chen"]) == "other"
+    # talk about the claim may stand next to an unmistakable yes
+    for plain in ("yes I want to know the status of my claim", "Yes, I'm calling about my denied claim", "yes so why was it denied"):
+        assert role_answer(plain, holder) == "self", plain
 
 
 @pytest.mark.parametrize(
     "text",
     ["My mom is the policyholder, I'm just helping. Why was the healthcare claim denied?", "it's actually her policy, I'm her daughter",
-     "I have power of attorney for her", "I'm just helping my mother with this", "I'm her legal guardian"],
+     "I have power of attorney for her", "I'm just helping my mother with this", "I'm her lawyer"],
 )
 def test_after_verification_saying_the_policy_is_someone_elses_goes_to_a_person(convo: Convo, text: str):
     convo.say(THREE_DETAILS)
@@ -326,9 +349,13 @@ def test_a_later_yes_does_not_undo_i_am_someone_else(convo: Convo, first: str):
      "yes, it's my own policy. she's my dependant.", "Yes, it's me, Margaret. He's not on the call.", "yes, me", "That's right", "Correct, it's me",
      "yep, I'm the account holder", "yes, my name is on the policy", "yes I'm calling for myself", "Yes, I'm the policyholder myself.", "yep that would be me"],
 )
-def test_saying_outright_that_one_is_the_policyholder_opens_the_gate_even_with_a_relative_in_the_sentence(convo: Convo, answer: str):
+def test_a_policyholder_who_says_more_than_yes_needs_at_most_one_more_question(convo: Convo, answer: str):
     convo.say(HUSBAND_TOLD)
     convo.say(answer)
+    if not convo.s.verified:
+        # Something stood next to the statement. It is asked once more, never handed off or refused.
+        assert convo.act == "ROLE_CHECK" and convo.s.memory.caller_role == "unknown"
+        convo.say("yes")
     assert convo.s.verified and convo.s.memory.caller_role == "policyholder"
 
 
@@ -439,3 +466,31 @@ def test_a_representative_asking_to_send_it_to_her_means_the_address_on_file(con
 def test_an_outcome_inside_a_condition_or_an_instruction_is_released(agent: Agent, reply: str):
     verdict = _verdict(agent, reply)
     assert verdict.ok, verdict.violations
+
+
+
+@pytest.mark.parametrize(
+    "opening",
+    ["My mom asked me to call about her claim. Margaret Chen, born 1985-03-15, SSN last four 4472.",
+     "My husband told me to call about my denied claim. Margaret Chen, born 1985-03-15, SSN last four 4472."],
+)
+def test_a_models_guess_that_the_caller_is_the_policyholder_does_not_skip_the_role_question(agent: Agent, opening: str):
+    # A model may read "policyholder" into a message that mentions someone else. It is asked, not assumed.
+    guess = reading(caller_role="policyholder", identity={"full_name": "Margaret Chen", "dob": "1985-03-15", "id_last4": "4472"})
+    c = Convo(agent, llm=ScriptedLLM(on_json=lambda *_: guess, on_text=lambda *_: "Thank you."))
+    reply = c.say(opening)
+    assert c.act == "ROLE_CHECK" and not c.s.verified
+    assert_no_leak(reply)
+
+
+def test_a_models_reading_of_policyholder_stands_only_when_the_caller_said_so_and_mentions_nobody(agent: Agent):
+    said = reading(caller_role="policyholder", identity={"full_name": "Margaret Chen", "dob": "1985-03-15", "id_last4": "4472"})
+    c = Convo(agent, llm=ScriptedLLM(on_json=lambda *_: said, on_text=lambda *_: "Thank you."))
+    c.say("I'm the policyholder. Margaret Chen, born 1985-03-15, SSN last four 4472.")
+    assert c.s.verified  # said outright, and nobody else is mentioned
+    c = Convo(agent, llm=ScriptedLLM(on_json=lambda *_: said, on_text=lambda *_: "Thank you."))
+    c.say("I'm the policyholder, my husband told me to call. Margaret Chen, born 1985-03-15, SSN last four 4472.")
+    assert c.act == "ROLE_CHECK" and not c.s.verified  # another person came up in the same message
+    c = Convo(agent, llm=ScriptedLLM(on_json=lambda *_: said, on_text=lambda *_: "Thank you."))
+    c.say("Margaret Chen, born 1985-03-15, SSN last four 4472. Why was my claim denied?")
+    assert c.act == "ROLE_CHECK" and not c.s.verified  # the model inferred it, the caller did not say it

@@ -163,7 +163,7 @@ def test_what_the_caller_said_earlier_reaches_the_reply_writer(agent: Agent):
     )
     llm = scripted([DEMO_READING, missing], ["ok", "Since the lab has closed, ask the hospital or your treating provider for a copy."])
     convo = Convo(agent, llm=llm)
-    convo.say("...")
+    convo.say(DEMO_UTTERANCE)
     convo.say("the lab closed down, what do I do?")
     directive = convo.trace["directive"]
     assert directive["facts"]["caller_said_earlier"] == ["Caller says the lab has closed and cannot reissue the pathology report."]

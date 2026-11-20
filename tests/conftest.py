@@ -33,14 +33,29 @@ PROTECTED = [
 
 
 class Convo:
-    def __init__(self, agent: Agent, scenario: str = "default", llm=None):
+    """Drives one conversation in a test.
+
+    Who is calling is always confirmed: a caller who gives three matching details and has not said
+    "I'm the policyholder" is asked "are you the policyholder yourself?". Most tests are about what
+    happens before or after that question. So when nobody else has come up in the conversation,
+    this helper answers the question with a plain "yes", as a policyholder would, and returns the
+    reply to that. Tests about the question itself pass ``answers_role=False`` or mention another
+    person. Conversations with a scripted model are never answered for.
+    """
+
+    def __init__(self, agent: Agent, scenario: str = "default", llm=None, answers_role: bool = True):
         self.agent = agent
         self.s = agent.new_session(scenario)
         self.llm = llm
+        self.answers_role = answers_role
         self.last: dict | None = None
 
     def say(self, text: str) -> str:
         self.last = self.agent.handle(self.s, text, llm=self.llm)
+        memory = self.s.memory
+        nobody_else = memory.caller_role == "unknown" and not memory.role_unclear  # no other person came up so far
+        if self.answers_role and self.llm is None and self.act == "ROLE_CHECK" and self.s.role_checks == 0 and nobody_else:
+            self.last = self.agent.handle(self.s, "yes", llm=self.llm)
         return self.last["reply"]
 
     def run(self, *lines: str) -> str:
