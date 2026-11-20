@@ -258,7 +258,7 @@ The suite covers the demo case, the verification gate, the bonus scenarios, scop
 .venv/bin/python scripts/live_check.py --offline --scenarios all       # the same outcome checks on the offline engine, free
 ```
 
-Ten scenarios are included: the seven demo scripts plus three that only a model can follow (spoken-style language such as "bday is march fifteenth nineteen eighty five", prompt injection before verification, and an anxious caller with a missing document).
+Twelve scenarios are included: the seven demo scripts plus five written for the model (spoken-style language such as "bday is march fifteenth nineteen eighty five", prompt injection before verification, an anxious caller with a missing document, a policyholder who mentions a relative, and a spouse who has three correct details but no consent).
 
 Results on 2026-11-19, all ten scenarios on the final version:
 

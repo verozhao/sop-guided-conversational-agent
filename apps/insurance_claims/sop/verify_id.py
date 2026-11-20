@@ -18,6 +18,7 @@ from typing import Any
 
 from sop_harness.core import Directive
 
+from ..nlu_rules import states_third_party
 from ..normalize import join_items
 from ..state import RESOLVE_INTENT, Session
 from ..understanding import Understanding
@@ -93,13 +94,21 @@ class VerifyIdPhase(PolicyBase):
         s.verification = result.summary()
         s.identity_ok = result.verified
         s.party_id = result.record.party_id if result.verified and result.record else None
-        if s.pending == "role_check" and m.caller_role == "unknown" and u.affirmation != "none":
-            # the answer to "are you the policyholder yourself?"
-            m.caller_role = "policyholder" if u.affirmation == "yes" else "representative"
-            m.role_unclear = False
+        holder_name = (m.identity.get("full_name") or "").lower()
+        own_name = bool(m.representative_name) and m.representative_name.lower() != holder_name
+        if s.pending == "role_check":
+            # The answer to "are you the policyholder yourself?". A no always wins, even against
+            # a reading that also says "policyholder", and so does a name of their own.
+            if u.affirmation == "no" or states_third_party(t.text) or own_name:
+                m.caller_role, m.role_guessed, m.role_unclear = "representative", False, False
+            elif u.affirmation == "yes" and (m.caller_role == "unknown" or m.role_guessed):
+                m.caller_role, m.role_guessed, m.role_unclear = "policyholder", False, False
         is_rep = self._is_rep(s)
 
         if result.verified:
+            if is_rep and m.role_guessed and not own_name and not s.rep_denials:
+                # Taken for a representative from wording alone: ask before treating them as one.
+                return self._role_check(s, t)
             if not is_rep:
                 if m.role_unclear and m.caller_role == "unknown":
                     return self._role_check(s, t)
@@ -441,6 +450,14 @@ class VerifyIdPhase(PolicyBase):
         details check out and that a consent request went out, and nothing else that is on file.
         """
         m = s.memory
+        same_person = "self_is_holder" in u.guessed or (
+            bool(m.representative_name) and m.representative_name.lower() == (m.identity.get("full_name") or "").lower()
+        )
+        if m.role_guessed and same_person and not s.rep_denials:
+            # They were taken for a representative from a turn of phrase, and the name they give
+            # as their own is the policyholder's. Ask, instead of refusing them as not listed.
+            m.caller_role, m.role_guessed, m.role_unclear, m.representative_name = "unknown", False, True, ""
+            return self._role_check(s, t)
         holder = self._holder(s)
         Holder = holder[0].upper() + holder[1:]
         facts: dict[str, Any] = {
