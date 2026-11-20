@@ -36,6 +36,7 @@ SCENARIOS: dict[str, dict] = {
             "I already told you who I am. This is ridiculous. Just tell me why my claim was denied.",
             "Why do you even need all this?",
             "Fine. My date of birth is March 15, 1985 and the last four of my SSN are 4472.",
+            "Yes, I am.",
             "What do I do now?",
             "that's all, thanks",
             "skip it",
@@ -75,6 +76,7 @@ SCENARIOS: dict[str, dict] = {
             "Hi, it's about my auto claim. And please email me a summary when we're done.",
             "Margaret Chen",
             "margaret@email.com, and my date of birth is 03/15/1985",
+            "Yes.",
             "thanks, that's all",
             "yes",
         ],
@@ -83,6 +85,7 @@ SCENARIOS: dict[str, dict] = {
         "title": "Ambiguous claim, then a second claim",
         "lines": [
             "Margaret Chen, born 1985-03-15, phone 650-521-2836",
+            "Yes, that's me.",
             "I have a question about my healthcare claim",
             "the first one",
             "What about my dental claim, how much was paid?",

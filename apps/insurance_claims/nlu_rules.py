@@ -14,7 +14,7 @@ import re
 from datetime import date
 
 from .data import ClaimsData
-from .normalize import MONTH_ALT, MONTHS, find_dates, norm_claim_id
+from .normalize import MONTH_ALT, MONTHS, find_dates, name_tokens, names_match, norm_claim_id
 from .state import CLOSED, PROCESS_CASE, RESOLVE_INTENT, VERIFY_ID, Session
 from .understanding import MENTIONS_OTHER_RE, Understanding, clean_representative_name, normalize_identity
 
@@ -41,9 +41,47 @@ LAST4_RE = re.compile(
 )
 # "my husband's birthday is", "my doctor's number is": the value after it is somebody else's
 _THIRD_PARTY_RE = re.compile(
-    r"\bmy\s+(?:mother|mom|mum|father|dad|wife|husband|son|daughter|partner|spouse|brother|sister|friend|kid|child|"
-    r"doctor|dentist|lawyer|attorney|boss|employer|provider|pharmacy|clinic|hospital)(?:'s)?\s+(?:[\w']+\s+){0,4}$",
+    r"\b(?:my|the|our|their|his|her|a)\s+(?:mother|mom|mum|father|dad|wife|husband|son|daughter|partner|spouse|brother|sister|friend|kid|"
+    r"child|doctor|dentist|physician|surgeon|specialist|therapist|lawyer|attorney|boss|employer|provider|pharmacy|pharmacist|clinic|"
+    r"hospital|lab|adjuster|agent|broker|insurer|billing\s+(?:office|department)|claims\s+(?:office|department|team))(?:'s|s')?\s+"
+    r"(?:[\w']+\s+){0,4}$|\bfax(?:\s+number)?\s+(?:is\s+|:\s*)?$",
     re.I,
+)
+# A phone number or an email address counts as an identity detail only when it is OFFERED as the
+# caller's own: on its own, as an item in a list of details, or after words such as "my phone is",
+# "the email on my policy is", "reach me at". Anywhere else in a sentence ("I tried calling ...",
+# "I got an email from ...", "the nurse's number is ...") it is not read at all, so it can neither
+# match nor count as a failed attempt.
+_OWN_NOUN = r"(?:phone|number|cell|cellphone|mobile|telephone|tel|landline|e-?mail|address|contact)"
+_OWN_CONTACT_RE = re.compile(
+    rf"\b(?:my|our)\s+(?:(?:own|personal|work|home|cell|mobile|main|current|contact|primary|e-?mail|phone|daytime|best)\s+)*{_OWN_NOUN}"
+    rf"(?:\s+(?:number|address))?(?:\s+(?:on|for|with|in)\s+(?:(?:my|the|this|that|your)\s+)?(?:policy|file|account|records?))?"
+    r"\s*(?:is|was|would\s+be|should\s+be|'s|as|[?:=\-.])?\s*$|"
+    rf"\b{_OWN_NOUN}(?:\s+(?:number|address))?\s+(?:(?:on|for|with|in)\s+(?:(?:my|the|this|your)\s+)?(?:policy|file|account|records?)|"
+    r"you\s+have(?:\s+(?:for|on)\s+me)?|on\s+record)\s*(?:is|was|should\s+be|would\s+be|'s|:)?\s*$|"
+    r"\b(?:reach|contact|text|e-?mail|message|call|phone|ring)\s+me\s+(?:at|on|via)\s*$|\b(?:signed\s+up|registered|enrolled)\s+with\s*(?:is\s+)?$|"
+    r"\b(?:you\s+can\s+)?(?:use|take|put\s+down|note)\s*$|"
+    rf"(?:^|[,;:\n(]|\s{{3,}}|\d\s|\b(?:and|it's|it\s+is|its|that's|yes|yeah|ok|okay|sure|um|uh|also|then|try))\s*"
+    rf"(?:(?:(?:my|the)\s+)?{_OWN_NOUN}(?:\s+(?:number|address))?\s*(?:is|should\s+be|[:=\-])?\s*)?$",
+    _I,
+)
+_THEIR_CONTACT_RE = re.compile(
+    rf"\b(?:her|his|their|the\s+policy\s?holder's)\s+(?:[\w\-]+\s+)?{_OWN_NOUN}(?:\s+(?:number|address))?\s*(?:is|was|:)?\s*$", _I
+)
+
+
+def _offered(before: str, is_rep: bool) -> bool:
+    return bool(_OWN_CONTACT_RE.search(before) or (is_rep and _THEIR_CONTACT_RE.search(before)))
+
+
+# "I sent the forms to claims@insurer.com": an address something was sent to is not the caller's own
+_SENT_TO_RE = re.compile(
+    r"\b(?:sent|send|sending|forward|forwarded|mailed|e-?mailed|wrote|written|faxed|submitted|uploaded|copied|cc'?d)\b[^.!?]{0,60}\bto\s*$", re.I
+)
+# Shared mailboxes are never a policyholder's own address.
+_ROLE_MAILBOXES = set(
+    """claims claim billing office info support help admin contact service customerservice noreply no-reply donotreply
+    appeals records reception frontdesk hello team enquiries inquiries accounts payments""".split()
 )
 # "call me back at ..." gives a number to ring, which need not be the one on the policy. "reach me at ..." is a detail.
 _CALLBACK_RE = re.compile(r"\b(?:call|text|ring|phone)\s+(?:me\s+)?back\s+(?:at|on)\s*$|\bcall-?\s?back\s+number\s+(?:is\s+)?$", re.I)
@@ -92,7 +130,7 @@ _COMMON = _NAME_STOP | {
 
 _WORD = re.compile(r"\s*([A-Za-z][A-Za-z'\-]*)([.,;!?:]?)")
 _CONTRACTION = re.compile(r"'(?:s|m|re|ll|ve|d|t)$", _I)
-_STRONG_NAME = re.compile(r"\b(?:full\s+)?name(?:\s+is|\s*[:=]|'s|\s+on\s+the\s+policy\s+is)\s+", _I)
+_STRONG_NAME = re.compile(r"\b(?:(?:full|last|first|family)\s+)?(?:sur)?name(?:\s+is|\s*[:=]|'s|\s+on\s+the\s+policy\s+is)\s+", _I)
 _WEAK_NAME = re.compile(r"\b(?:i\s+am|i'm|this\s+is|it's|it\s+is|that's|that\s+is)\s+", _I)
 _SUFFIX_NAME = re.compile(r"\b(?:this\s+is|it's|i'm|i\s+am)\s+([a-z'\-]+\s+[a-z'\-]+)\s+(?:calling|speaking|here)\b", _I)
 
@@ -115,6 +153,7 @@ _SELF = r"(?:i\s+am|i'm|im|this\s+is|it's|it\s+is)"
 _POSSESSIVE_ROLE = re.compile(
     rf"\b{_SELF}\s+{_NAME_RUN}'s\s+{_ROLES}\b|^\W*{_NAME_RUN}'s\s+{_ROLES}\s+(?:here|calling|speaking)\b", _I
 )
+_POSSESSIVE_ANY = re.compile(rf"\b(?:i\s+am|i'm|im)\s+{_NAME_RUN}'s\s+(?!(?:policy|claim|account|plan|name)\b)[a-z]", _I)
 # "calling for Jane Doe" in any letter case. "calling about ..." needs capitals, because a topic can follow it.
 _CALLING_FOR = re.compile(rf"\b(?:calling|phoning|ringing|asking)\s+(?:in\s+)?(?:for|on\s+behalf\s+of)\s+{_NAME_RUN}", _I)
 _CALLING_ABOUT = re.compile(r"\b[Cc]alling\s+(?:in\s+)?(?:about|regarding)\s+((?:[A-Z][A-Za-z\-]+\s+){1,2}[A-Z][A-Za-z\-]+)")
@@ -132,12 +171,12 @@ REP_STRONG_RE = re.compile(
     rf"\bon\s+behalf\s+of\b(?!\s+(?:myself|me)\b)|\bcalling\s+(?:in\s+)?for\s+(?:her|him|them|some(?:one|body)\s+else)\b|"
     rf"\b(?:calling|phoning|ringing|asking|here|speaking|doing\s+this|it's|it\s+is|this\s+is|that's)\s+(?:in\s+)?"
     rf"for\s+(?:my|our|a|the)\s+(?:{_PERSONS})\b(?!'s)|"
-    rf"\bi(?:'m|\s+am)\s+(?:her|his|their)\s+{_ROLES}\b|"
+    rf"\bi(?:'m|\s+am)\s+(?:her|his|their)\s+{_ROLES}\b|\bi(?:'m|\s+am)\s+(?:her|his)\s+[a-z]|"
     rf"\bi(?:'m|\s+am)\s+the\s+{_ROLES}\s+of\b|\bpower\s+of\s+attorney\b|\bauthori[sz]ed\s+representative\b|"
     r"\bi(?:'m|\s+am)\s+not\s+the\s+policy\s?holder\b|\b(?:her|his|their)\s+behalf\b|"
     rf"\bthe\s+policy\s?holder'?s\s+{_ROLES}\b|\bthe\s+policy\s?holder\s+is\s+my\s+(?:{_RELATIVES})\b|"
     rf"\b(?:this\s+is|it's)\s+(?:her|his|their)\s+{_ROLES}\b|^\W*(?:her|his|their)\s+{_ROLES}\b|"
-    r"\bnot\s+mine\b|\bnot\s+my\s+(?:own\s+)?(?:policy|claim|account)\b",
+    r"\b(?:not|isn't|ain't)\s+mine\b|\b(?:not|isn't|ain't)\s+my\s+(?:own\s+)?(?:policy|claim|account)\b(?!\s+(?:number|no\b|id\b|#))",
     _I,
 )
 # Weak cues: talking about somebody else's claim ...
@@ -154,19 +193,26 @@ REP_WEAK_DETAIL_RE = re.compile(
     _I,
 )
 # Once the gate has opened, only an explicit statement about oneself counts.
-SELF_REP_RE = re.compile(
-    rf"\bi(?:'m|\s+am)\s+(?:actually\s+|really\s+)?(?:her|his|their)\s+{_ROLES}\b|\bi(?:'m|\s+am)\s+not\s+the\s+policy\s?holder\b|"
-    r"\bcalling\s+on\s+(?:her|his|their)\s+behalf\b|"
-    rf"\bi(?:'m|\s+am)\s+(?:actually\s+|really\s+|only\s+|just\s+)?calling\s+(?:for|on\s+behalf\s+of)\s+(?:her|him|them|my\s+(?:{_RELATIVES}))\b|"
-    rf"\bthis\s+is\s+(?:actually\s+)?(?:her|his|their)\s+{_ROLES}\b|\bnot\s+my\s+(?:own\s+)?(?:policy|claim)\b",
-    _I,
+# A role that only somebody acting for another person has. Family relations are not in it, and
+# neither are "guardian" and "caregiver": a parent is a guardian and a wife is a caregiver, of
+# people on their own policy.
+_AGENT_ROLE = (
+    r"(?:representative|rep|lawyer|attorney|proxy|executor|trustee|secretary|assistant|employee|accountant|broker|agent|advocate|"
+    r"case\s?worker|social\s+worker)"
 )
-# Answers to "are you the policyholder yourself?". A no is looked for first, and a yes
-# only counts when nothing in the message negates it: "No, I am not" must never read as "I am".
-ITS_ME_RE = re.compile(
-    r"\b(?:that's|it's|this\s+is|that\s+is|it\s+is)\s+me\b|\bmyself\b|\bmy\s+own\b|^\W*(?:yes[\s,]*)?i\s+am\W*$|"
-    r"\bi(?:'m|\s+am)\s+the\s+(?:policy\s?holder|insured|account\s+holder|one)\b|^\W*speaking\W*$|"
-    r"\b(?:it's|it\s+is|that's|policy\s+is|policy's|account\s+is)\s+mine\b|\b(?:in|under)\s+my\s+(?:own\s+)?name\b|\bmy\s+policy\b",
+SELF_REP_RE = re.compile(
+    rf"\bi(?:'m|\s+am)\s+(?:actually\s+|really\s+|just\s+)?(?:her|his|their)\s+(?:[\w\-]+\s+)?{_AGENT_ROLE}\b|"
+    r"\bcalling\s+on\s+(?:her|his|their)\s+behalf\b|"
+    rf"\b(?:calling|doing\s+this|asking|acting|here)\s+(?:for|on\s+behalf\s+of)\s+(?:her|him|them|my\s+(?:{_RELATIVES}))\b|"
+    rf"\bthis\s+is\s+(?:actually\s+)?(?:her|his|their)\s+{_AGENT_ROLE}\b|"
+    rf"\b(?:my\s+)?(?:{_RELATIVES})(?:\s+[a-z]+)?(?:'s|\s+is)\s+the\s+(?:policy\s?holder|policy\s?owner|account\s+holder)\b|"
+    rf"\bthe\s+policy\s?holder\s+is\s+(?:my\s+(?:{_RELATIVES})|not\s+me|her|him)\b|"
+    rf"\b(?:the\s+)?policy\s+is\s+(?:my\s+(?:{_RELATIVES})'s|hers|his|in\s+(?:my\s+(?:{_RELATIVES})'s|her|his)\s+name)\b|"
+    rf"\bpolicy\s+belongs\s+to\s+(?:my\s+(?:{_RELATIVES})|her|him)\b|^\W*(?:(?:well|actually|oh)\W+)*it\s+belongs\s+to\s+(?:my\s+(?:{_RELATIVES})|her|him)\b|"
+    rf"\b(?:it's|it\s+is|this\s+is)\s+(?:actually\s+)?(?:her|his|my\s+(?:{_RELATIVES})'s)\s+(?:policy|account)\b|"
+    r"\bi(?:'m|\s+am)\s+(?:the\s+)?(?:policy\s?holder|account\s+holder|insured)'s\s+[a-z]|"
+    r"\bi\s+(?:have|hold)\s+(?:\w+\s+){0,2}?(?:power\s+of\s+attorney|poa)\b|\bi(?:'m|\s+am)\s+(?:just|only)\s+helping\b|"
+    r"\bi(?:'m|\s+am)\s+not\s+(?:her|him)\b",
     _I,
 )
 # "I'm not" counts when it stands alone or is about being the policyholder. "I'm not sure
@@ -182,8 +228,10 @@ NOT_ME_RE = re.compile(
     _I,
 )
 POLICYHOLDER_RE = re.compile(
-    r"\bi(?:'m|\s+am)\s+the\s+(?:policy\s?holder|insured|member|account\s+holder)(?!'s)\b|"
-    r"\b(?:it(?:'s|\s+is)|this\s+is)\s+my\s+(?:own\s+)?policy\b|\bmy\s+own\s+(?:policy|claim)\b",
+    r"(?:^|[.!?;,]\s*|\b(?:and|hi|hello|hey|so|well|yes|yeah)\s+)i(?:'m|\s+am)\s+(?:the\s+)?(?:policy\s?holder|policy\s?owner|account\s+holder|account\s+owner)"
+    r"(?:\s+(?:myself|here|speaking|on\s+(?:the|this|my)\s+(?:policy|account)))?"
+    r"\s*(?=[.!?;]|,(?!\s*not\b)|$|\s+and\s+(?:i|i'm|i'd|i've|my|we|it|this|that|would|want|need|have|am|was|just)\b)|"
+    r"(?:^|[.!?;,]\s*|\b(?:and|hi|hello|hey|so|well|yes|yeah)\s+)(?:it(?:'s|\s+is)|this\s+is)\s+my\s+(?:own\s+)?policy\s*(?=[.!?;,]|$)",
     _I,
 )
 
@@ -203,7 +251,7 @@ DECLINE_FIELDS = [
 ]
 REFUSAL_RE = re.compile(
     r"already\s+(?:told|gave|said|explained|provided|verified|went\s+through)|"
-    r"\bjust\s+(?:tell|give|answer|show)\s+me\b|"
+    r"\bjust\s+(?:tell|give|answer|show)\s+me\b|\bjust\s+answer\s+(?:my|the|it|us)\b|"
     r"\b(?:not|won't|will\s+not|wont|refuse\s+to|don't\s+want\s+to|do\s+not\s+want\s+to|not\s+going\s+to|"
     r"shouldn't\s+have\s+to|should\s+not\s+have\s+to|don't\s+have\s+to|not\s+comfortable)\s+"
     r"(?:giv|shar|provid|tell|verif|answer|say|disclos)\w*|"
@@ -336,7 +384,7 @@ STATUS_RULES = [
     ("open", r"\bopen\b|\bin\s+progress\b|\bpending\b|\bprocessing\b|\bongoing\b|\bunder\s+review\b"),
     ("closed", r"\bclosed\b|\bsettled\b|\bcompleted\b|\bpaid\s+out\b|\bresolved\b"),
 ]
-_REF = r"(?:claims?|case|one)"
+_REF = r"(?:claims?|case|one|thing)"
 MONTH_CTX_RE = re.compile(
     rf"\b(?:from|in|of|last|this|back\s+in|filed\s+in|since|around|during|for)\s+({MONTH_ALT})\b|"
     rf"\b({MONTH_ALT})\s+(?:claim|20\d{{2}})\b",
@@ -635,6 +683,8 @@ def _take_name(rest: str, require_caps: bool) -> str:
         if not match:
             break
         word, punct = match.group(1), match.group(2)
+        if word.endswith("-") or rest[match.end(1): match.end(1) + 1].isdigit():
+            break  # "POL-9921", "CL-2048": part of an identifier, never of a name
         possessive = word.lower().endswith("'s")
         if possessive:
             word = word[:-2]
@@ -680,7 +730,7 @@ def _name_tail(candidate: str) -> str:
 _NUMBER_LEAD = set(
     """it it's its is that that's thats they they're theyre those these are be the my number numbers digits digit code
     should would um uh er erm hmm ok okay yes yeah yep yup sure then answer think i believe guess so well oh here you go
-    alright right sorry and just actually last four""".split()
+    alright right sorry and just actually last four try trying let's lets maybe perhaps or no wait meant instead""".split()
 )
 # A year can also be led into by "born in", "it was", "the year".
 _YEAR_LEAD = _NUMBER_LEAD | {"was", "in", "year", "born", "birth", "of", "around"}
@@ -703,8 +753,8 @@ def _bare_name(segment: str, allow_lower: bool) -> tuple[str, bool]:
     tokens = cleaned.split()
     if not 2 <= len(tokens) <= 4 or not all(re.fullmatch(r"[A-Za-z][A-Za-z'\-]*", t) for t in tokens):
         return "", False
-    if any(t.lower() in _COMMON or _CONTRACTION.search(t) for t in tokens):
-        return "", False
+    if any(t.lower() in _COMMON or _CONTRACTION.search(t) for t in tokens) or all(len(t) == 1 for t in tokens):
+        return "", False  # "C H E N" is a name being spelled out, not a name
     if all(t[0].isupper() for t in tokens):
         return cleaned, False
     if allow_lower and len(tokens) <= 3 and not any(re.search(r"(?:ing|tion|ment|ly)$", t.lower()) for t in tokens):
@@ -759,7 +809,8 @@ def _email_choice(low: str, polarity: str, at_offer: bool, question_like: bool, 
 
 def states_third_party(text: str) -> bool:
     """The caller says outright that they act for somebody else ("I'm her husband", "calling for Jane Doe")."""
-    if REP_STRONG_RE.search(text) or NOT_ME_RE.search(text):
+    plain = _PARENT_OF_RE.sub(" ", text)  # "I'm her mother", "calling for my son": asked about, never assumed
+    if REP_STRONG_RE.search(plain) or NOT_ME_RE.search(plain):
         return True
     match = _POSSESSIVE_ROLE.search(text)
     if match and _name_tail(match.group(1) or match.group(2)):
@@ -767,11 +818,413 @@ def states_third_party(text: str) -> bool:
     return any((m := pattern.search(text)) and _name_tail(m.group(1)) for pattern in (_CALLING_FOR, _CALLING_ABOUT, _ROLE_FOR, _IS_MY))
 
 
+_KIN_ONLY = (
+    r"(?:mother|mom|mum|father|dad|wife|husband|son|daughter|partner|spouse|brother|sister|grandmother|grandfather|grandma|grandpa|"
+    r"aunt|uncle|parents?|child(?:ren)?|kids?|niece|nephew|cousin|grandson|granddaughter|grandkid|grandchild|stepson|stepdaughter|"
+    r"fianc[e\u00e9]e?|boyfriend|girlfriend|hubby|wifey|missus|family|relatives?|in-law|friend|neighbou?r)"
+)
+_ACTING_ROLE = (
+    r"(?:representative|rep|lawyer|attorney|guardian|caregiver|caretaker|carer|poa|proxy|executor|trustee|beneficiary|depend[ae]nt|"
+    r"secretary|assistant|nurse|employee|colleague|housekeeper|aide|helper|accountant|broker|agent|advocate|case\s?worker|social\s+worker)"
+)
+_KINSHIP = rf"(?:{_KIN_ONLY}|{_ACTING_ROLE})"
+# "I'm her mother" and "calling for my son" are what a policyholder says about a child on their own
+# plan, and what a parent says who calls for a grown child. Neither is assumed: it is asked.
+_PARENT = r"(?:mother|mom|mum|mommy|mama|father|dad|daddy|papa|parent|stepmother|stepfather|stepmom|stepdad)"
+_CHILD = r"(?:son|daughter|child|kid|baby|boy|girl|stepson|stepdaughter|little\s+one|toddler|infant|newborn|minor)"
+_PARENT_OF_RE = re.compile(
+    rf"\bi(?:'m|\s+am)\s+(?:her|his|their)\s+{_PARENT}\b|"
+    rf"\b(?:calling|phoning|ringing|asking|here|speaking|doing\s+this|it's|it\s+is|this\s+is|that's)\s+(?:in\s+)?(?:for|on\s+behalf\s+of)\s+(?:my|our)\s+(?:[\w\-]+\s+)?{_CHILD}\b(?!'s)|"
+    rf"\bon\s+behalf\s+of\s+(?:my|our)\s+(?:[\w\-]+\s+)?{_CHILD}\b(?!'s)|\bon\s+(?:my|our)\s+{_CHILD}'s\s+behalf\b",
+    _I,
+)
+# What a policyholder calls themselves. "The insured" is not in it: a dependant is insured too.
+_SELF_ROLE = r"(?:policy\s?holder|policy\s?owner|account\s+holder|account\s+owner)"
+_HOLDER_WORD = r"(?:policy\s?holder|policy\s?owner|account\s+holder|account\s+owner|insured|owner|member|subscriber)"
+
+# ---------------------------------------------------------------- "are you the policyholder yourself?"
+# Three kinds of answer, and only the first opens the gate.
+#   self     every clause is a plain yes, an outright statement ("I'm the policyholder", the
+#            policyholder's own name), or talk about the claim with no other person in it
+#   other    the caller says outright that they are not the policyholder: a no, a name of their own
+#            that is not the policyholder's, the policy or the policyholder spoken of as somebody
+#            else's, a role that only someone acting for another person has
+#            ("I'm her lawyer"), or a description of themselves as somebody's relative or helper
+#            ("I'm her son", "on her behalf")
+#   unclear  everything else: an answer that says both ("I'm his wife and the policyholder"), and
+#            "I'm her mother", which a policyholder says about a child on her plan. It is asked
+#            again with a request for a plain yes or no, never guessed.
+# A yes is defined by what it may contain, so wording nobody thought of cannot open the gate.
+# "other" is for good: a later yes does not undo "I'm her son".
+_NOT_A_NUMBER = r"(?!\s+(?:number|no\b|id\b|#))"
+_SAYS_NO_RE = re.compile(
+    r"\bnot\s+me\b|\b(?:i'm|i\s+am)\s+not(?=\W*$|\s*[,.;!]|\s+(?:the\s+)?(?:policy\s?holder|policy\s?owner|account\s+holder|insured|member|owner|one|her|him|them)\b)|"
+    r"\bnot\s+the\s+(?:policy\s?holder|policy\s?owner|account\s+holder)\b|\b(?:not|isn't|ain't)\s+mine\b|"
+    rf"\b(?:not|isn't|ain't)\s+my\s+(?:own\s+)?(?:policy|account)\b{_NOT_A_NUMBER}|\b(?:someone|somebody)\s+else(?:'s)?\b",
+    _I,
+)
+_POLICY_IS_ANOTHERS_RE = re.compile(
+    rf"\b(?:she|he)(?:'s|\s+is)\s+the\s+{_HOLDER_WORD}\b|\b(?:it's|it\s+is|that's|that\s+is)\s+(?:hers|his|theirs)\b|"
+    rf"\b(?:her|his|their)\s+(?:own\s+)?(?:policy|account)\b{_NOT_A_NUMBER}|\b(?:under|in)\s+(?:her|his|their)\s+(?:own\s+)?name\b|"
+    rf"\b(?:my|our)\s+(?:[\w\-]+\s+)?{_KINSHIP}'s\s+(?:policy|account|name|plan)\b|"
+    rf"\b(?:it's|it\s+is|that's|that\s+is)\s+(?:my|our)\s+(?:[\w\-]+\s+)?{_KINSHIP}'s\s*(?=[.!?;,]|$)|"
+    rf"\bpolicy\s+is\s+(?:hers|his|theirs|(?:my|our)\s+(?:[\w\-]+\s+)?{_KINSHIP}'s)\b|"
+    r"\bpolicy\s+(?:belongs\s+to|is\s+owned\s+by|is\s+held\s+by)\s+(?!me\b|myself\b)|\bbelongs\s+to\s+(?:her|him|them|my|our)\b|"
+    rf"\b(?:(?:my|our)\s+)?(?:[\w\-]+\s+)?{_KINSHIP}(?:'s|\s+is)\s+the\s+{_HOLDER_WORD}\b|"
+    rf"\bthe\s+{_HOLDER_WORD}\s+is\s+(?!me\b|myself\b|i\b|here\b|speaking\b|calling\b)\w|"
+    rf"\b(?:the\s+)?(?:policy\s?holder|policy\s?owner|account\s+holder|insured)'s\s+[a-z]|\b{_KINSHIP}\s+of\s+the\s+{_HOLDER_WORD}\b",
+    _I,
+)
+_ACTS_FOR_RE = re.compile(
+    rf"\bi(?:'m|\s+am)\s+(?:(?:just|only|actually|really)\s+)?(?:(?:her|his|their|the|a|an|your)\s+(?:[\w\-]+\s+){{0,2}}?)?{_AGENT_ROLE}\b(?!'s)|"
+    r"\bi\s+(?:have|hold)\s+(?:\w+\s+){0,2}?(?:power\s+of\s+attorney|poa)\b|\bi(?:'m|\s+am)\s+(?:her|his|their|the)\s+(?:power\s+of\s+attorney|poa)\b|"
+    r"\bi\s+represent\b|\bi\s+(?:work|act|speak|sign)\s+for\b|\bi(?:'m|\s+am)\s+(?:representing|acting\s+for|working\s+for)\b",
+    _I,
+)
+_KIN_ADJ = r"(?:(?:legal|court-appointed|appointed|authori[sz]ed|primary|only|eldest|oldest|youngest|adult)\s+){0,2}"
+_DESCRIBES_OTHER_RE = re.compile(
+    # "I'm her son", "I'm his anything", "I'm one of her kids". Not "I'm her mother".
+    rf"\bi(?:'m|\s+am)\s+(?:(?:just|only|actually|really)\s+)?(?:her|his|their|one\s+of)\s+(?!(?:[\w\-]+\s+)?{_PARENT}\b)[a-z]|"
+    # "I'm the son", "I'm a family member", "I'm the legal guardian"
+    rf"\bi(?:'m|\s+am)\s+(?:(?:just|only|actually|really)\s+)?(?:the|a|an)\s+{_KIN_ADJ}(?:[\w\-]+\s+)?(?!{_PARENT}\b){_KINSHIP}\b(?!'s)|"
+    # "this is her husband", "it's me, the daughter", "her daughter speaking"
+    rf"\b(?:this\s+is|it's|it\s+is)\s+(?:me,?\s+)?(?:her|his|their|the|a)\s+{_KIN_ADJ}(?!{_PARENT}\b){_KINSHIP}\b"
+    r"(?!'s|\s+(?:plan|policy|account|coverage|deductible|claim|doctor))|"
+    rf"\b(?:her|his|their)\s+{_KIN_ADJ}(?!{_PARENT}\b){_KINSHIP}\s+(?:here|speaking|calling)\b|"
+    # "she's my mother": the policyholder is somebody else. Not "he's my son", said of a child on one's own plan.
+    rf"\b(?:she|he)(?:'s|\s+is)\s+(?:my|our)\s+(?:[\w\-]+\s+)?(?!{_CHILD}\b){_KINSHIP}\b|"
+    # "calling for my mother", "here for her", "on her behalf", "on behalf of ..."
+    rf"\b(?:calling|call|asking|here|doing\s+(?:this|it)|acting|speaking|phoning)\s+(?:in\s+)?for\s+"
+    rf"(?:(?:my|our|a|the)\s+(?:[\w\-]+\s+)?(?!{_CHILD}\b){_KINSHIP}\b(?!'s)|her\b|him\b|them\b|someone\b|somebody\b)|"
+    rf"\bon\s+(?:her|his|their)\s+behalf\b|\bon\s+behalf\s+of\b(?!\s+(?:myself\b|me\b|(?:my|our)\s+(?:[\w\-]+\s+)?{_CHILD}\b))|"
+    r"\bon\s+(?!my\b|our\b)[\w.]+(?:\s+[\w.]+)?'s\s+behalf\b|"
+    # "I look after her affairs", "I'm the one who handles his paperwork", "I'm just helping"
+    r"\b(?:handle|handles|manage|manages|look\s+after|looks\s+after|take\s+care\s+of|takes\s+care\s+of)\s+(?:her|his|their)\b|"
+    r"\b(?:helping|help)\s+(?:her|him|them)\b|\bi(?:'m|\s+am)\s+(?:just|only)\s+helping\b|"
+    r"\bi(?:'m|\s+am)\s+(?:(?:just|only|actually)\s+)?(?:assisting|here\s+for)\b|\bi\s+care\s+for\b",
+    _I,
+)
+# The same said in two or three words: "the son", "family", "for my mother", "well, my wife's".
+_BARE_OTHER_RE = re.compile(
+    rf"(?:just\s+)?(?:(?:the|a|an|her|his|their)\s+)?{_KIN_ADJ}(?!{_PARENT}\b){_KINSHIP}(?:\s+member)?|"
+    rf"for\s+(?:(?:my|our|the|a)\s+(?:[\w\-]+\s+)?(?!{_CHILD}\b){_KINSHIP}|her|him|them|someone|somebody)\b.*|"
+    rf"(?:my|our)\s+(?:[\w\-]+\s+)?(?!{_CHILD}\b){_KINSHIP}(?:'s|\s+is|\s+does|\s+owns\s+it|\s+holds\s+it)?",
+    _I,
+)
+_CORRECTION_LEAD_RE = re.compile(r"^\W*(?:(?:well|actually|i\s+mean|sorry|or\s+rather|rather|no\s+wait|wait|oh)\b[\s,.!\-]*)*", _I)
+# The caller also claims, somewhere in the message, that the policy is their own. Next to a
+# statement that it is somebody else's the answer says both, and it is asked again.
+_SELF_CLAIM_RE = re.compile(
+    rf"\bi(?:'m|\s+am)\s+(?:[\w\s]{{0,40}}?\band\s+)?(?:also\s+)?(?:the\s+)?(?:{_HOLDER_WORD}|customer)\b(?!'s)|"
+    r"\b(?:on\s+)?my\s+(?:own\s+)?(?:policy|plan|account|insurance)\b|\b(?:it's|it\s+is|that's)\s+(?:me|mine)\b(?=\W*$|\s*[.!?;,])|\bmyself\b|"
+    r"\bin\s+my\s+(?:own\s+)?name\b",
+    _I,
+)
+# Names are read with their capitals: "it's David Chen", "David speaking".
+_NAME = r"((?:[A-Z][a-z'\-]+\.?\s+){0,2}[A-Z][a-z'\-]+)"
+_NAME_INTRO_RE = re.compile(
+    rf"(?i:\b(?:i'm|i\s+am|im|this\s+is|it's|it\s+is|its|my\s+name\s+is|my\s+name's|name's|name\s+is))(?i:\s+me)?,?\s+"
+    rf"(?i:(?:actually|really|just)\s+)?(?i:(?:her|his|their)\s+\w+\s+)?{_NAME}(?!'s)"
+)
+_OWN_NAME_RE = re.compile(
+    rf"(?i:\b(?:i'm|i\s+am|my\s+name\s+is|my\s+name's))\s+(?i:(?:actually|really|just)\s+)?(?i:(?:her|his|their)\s+\w+\s+)?{_NAME}(?!'s)"
+)
+_NAME_SPEAKING_RE = re.compile(rf"\b{_NAME}\s+(?i:speaking|here|calling)\b")
+# Before the gate a name is only taken as the caller's own in the plainest forms: "David here." at
+# the start of a sentence, and "it's me David".
+_OPENING_NAME_RE = re.compile(rf"^\W*(?i:(?:hi|hello|hey|yes|good\s+(?:morning|afternoon|evening))\b[\s,.!]*)*{_NAME}\s+(?i:here|speaking|calling)\b")
+_ITS_ME_NAME_RE = re.compile(rf"(?i:\b(?:it's|it\s+is|this\s+is)\s+me),?\s+{_NAME}(?!'s)")
+_HONORIFICS = {"mr", "mrs", "ms", "miss", "mx", "dr"}
+_WEEKDAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+# Capitalised words after "I'm" or "it's" that are not a name.
+_NOT_A_NAME = _COMMON | _WEEKDAYS | set(MONTHS) | {
+    "sorry", "fine", "sure", "positive", "certain", "confused", "not", "just", "still", "here", "calling", "trying", "asking", "afraid",
+    "okay", "ok", "yes", "no", "sir", "madam", "really", "very", "so", "well", "ready", "upset", "angry", "worried", "scared", "frustrated",
+    "tired", "her", "his", "their", "my", "your", "a", "an", "the", "on", "in", "at", "with", "from", "about", "i", "ssn", "dob", "id",
+}
+# A yes to the role question. "ok" and "fine" are not in it: they do not answer "are you ...?".
+_ROLE_YES = (
+    r"(?:yes|yeah|yep|yup|ya|yea|uh\s+huh|mhm+|correct|right|that's\s+right|that\s+is\s+right|that's\s+correct|that\s+is\s+correct|"
+    r"absolutely|definitely|obviously|certainly|of\s+course|indeed|affirmative|exactly|sure\s+thing|sure|you\s+bet|you\s+got\s+it|yessir)"
+)
+_ROLE_FILLER = (
+    r"(?:really|totally|sir|ma'am|maam|madam|please|thanks|thank\s+you|oh|well|um|uh|hi|hello|ok|okay|no\s+problem|no\s+worries|"
+    r"i\s+am|i\s+sure\s+am|sure\s+am|it\s+is)"
+)
+# "Right" and "sure" are also how a sentence about something else begins. Next to other talk only
+# an unmistakable yes counts.
+_FIRM_YES = r"(?:yes|yessir|yeah|yep|yup|ya|yea|correct|that's\s+right|that\s+is\s+right|that's\s+correct|that\s+is\s+correct|affirmative)"
+_FIRM_YES_RE = re.compile(rf"\b{_FIRM_YES}\b|\bi\s+am\b", _I)
+_YES_THEN_TALK_RE = re.compile(rf"^\W*{_FIRM_YES}\b[\s,.!\-]*", _I)
+_YES_CLAUSE_RE = re.compile(rf"(?:(?:{_ROLE_YES}|{_ROLE_FILLER})\b[\s,.!]*)+", _I)
+_YES_WORD_RE = re.compile(rf"\b(?:{_ROLE_YES}|i\s+am|sure\s+am)\b", _I)
+# What may stand in front of a statement: "yes, I'm the policyholder". Not "I am", which is one.
+_YES_LEAD_RE = re.compile(
+    rf"^\W*(?:(?:{_ROLE_YES}|really|totally|sir|ma'am|maam|madam|please|thanks|thank\s+you|oh|well|um|uh|hi|hello|and|so)\b[\s,.!\-]*)*", _I
+)
+# The outright statements. A clause has to be exactly one of them: "I'm the other insured",
+# "I'm the policyholder's son" and "it's me David" are not.
+_SELF_TEMPLATES = (
+    r"i(?:'m|\s+am)(?:\s+(?:indeed|sure))?",
+    r"(?:it's|it\s+is|that's|that\s+is|this\s+is|that\s+would\s+be|that'd\s+be)\s+(?:me|i|mine)",
+    r"me|mine|myself|speaking|for\s+myself|the\s+(?:very\s+)?same",
+    rf"i(?:'m|\s+am)\s+(?:the|your)\s+{_SELF_ROLE}(?:\s+(?:myself|here|speaking|yes|on\s+(?:the|this|my)\s+(?:policy|account)))?",
+    rf"the\s+{_SELF_ROLE}\s+is\s+me",
+    rf"(?:the\s+)?{_SELF_ROLE}(?:\s+(?:myself|here|speaking))?",
+    r"(?:it's|it\s+is|this\s+is|that's)\s+(?:my\s+(?:own\s+)?(?:policy|account)|in\s+my\s+(?:own\s+)?name|under\s+my\s+(?:own\s+)?name)",
+    r"(?:the\s+)?policy\s+is\s+(?:mine|in\s+my\s+(?:own\s+)?name|under\s+my\s+(?:own\s+)?name)",
+    r"i(?:'m|\s+am)\s+calling\s+(?:for|about)\s+(?:myself|my\s+own\s+(?:policy|claim))",
+    r"this\s+is\s+(?:she|he|her|him)",
+    r"i\s+(?:hold|own)\s+the\s+policy",
+)
+# Talk about the claim may stand next to a yes ("Yes. Why was it denied?") when no person but the
+# caller is in it. Any pronoun, relation, title, role or name makes the answer one to ask about.
+_PERSON_RE = re.compile(
+    rf"\b(?:she|he|her|hers|him|his|they|them|their|theirs|someone|somebody|anyone|anybody|everyone|everybody|we|us|our|ours|"
+    rf"{_KINSHIP}|patient|client|{_HOLDER_WORD}|holder|behalf|mr|mrs|ms|mx|dr|jr|sr)\b|'s\s+(?:policy|account|claim|name|plan)\b|"
+    r"\bi(?:'m|\s+am)\b(?!\s+(?:(?:just|only|still)\s+)?(?:calling|asking|trying|looking|wondering|hoping|waiting|checking|following|inquiring|enquiring)\b)",
+    _I,
+)
+_CLAIM_WORD_RE = re.compile(
+    r"\b(?:claims?|denied|denial|deny|rejected|rejection|status|appeal\w*|documents?|paperwork|forms?|payments?|paid|pay|reimburs\w*|deadline|"
+    r"covered|coverage|bill|approved?|approval|pending|update|summary|e-?mail|reason|next\s+steps?|help|information|info|details?|question)\b",
+    _I,
+)
+
+
+def _holders(names: str | list[str] | tuple[str, ...]) -> list[tuple[str, ...]]:
+    """The words of every name the policyholder goes by, lower-cased: ("margaret", "chen"), ("ya", "wen", "li")."""
+    out: list[tuple[str, ...]] = []
+    for name in [names] if isinstance(names, str) else list(names):
+        words = tuple(name_tokens(name or ""))
+        if words and words not in out:
+            out.append(words)
+    return out
+
+
+def _name_pattern(words: tuple[str, ...]) -> str:
+    """The name in full, the given names, first and last name, or the first name alone."""
+    forms = [list(words), list(words[:-1]), [words[0], words[-1]], [words[0]]]
+    options = dict.fromkeys(r"[\s\-]+".join(map(re.escape, form)) for form in forms if form)
+    return "(?:" + "|".join(options) + ")"
+
+
+def _somebody_else(name: str, holders: list[tuple[str, ...]]) -> bool:
+    """A capitalised name that is not one the policyholder goes by."""
+    words = [w.lower().rstrip(".") for w in name.split()]
+    titled = words[0] in _HONORIFICS
+    words = [w for w in words if w not in _HONORIFICS]
+    theirs = {word for name_words in holders for word in name_words}
+    if not words or words[0] in _NOT_A_NAME or all(w in theirs for w in words) or re.fullmatch(_KINSHIP, words[0]):
+        return False  # "I'm Sorry", "Mom here", or the policyholder's own name in any order
+    if words[0] in {name_words[0] for name_words in holders}:
+        return False  # "I'm Margaret Chen Jr": not somebody else by name, so it is asked about
+    return not (titled and words[0] in theirs)  # "I'm Mrs Chen" cannot be told from the policyholder
+
+
+def _other_name(text: str, holders: list[tuple[str, ...]], first_person_only: bool = False) -> str:
+    """A name the caller gives as their own that is not the policyholder's: "I'm David Chen", "David speaking"."""
+    found = [m.group(1) for m in (_OWN_NAME_RE if first_person_only else _NAME_INTRO_RE).finditer(text)]
+    if not first_person_only:
+        found += [m.group(1) for m in _NAME_SPEAKING_RE.finditer(text)]
+    return next((name for name in found if _somebody_else(name, holders)), "")
+
+
+def said_to_be_someone_else(text: str, holder_names: str | list[str] | tuple[str, ...]) -> tuple[bool, str]:
+    """Before the gate: did this message say outright that the caller is not the policyholder?
+
+    "David here.", "it's me David", "I work for Margaret", "friend of Margaret". The name, when one
+    was given, comes back with the answer. Read once the record is known, over everything the
+    caller wrote, so an introduction in the first message still counts when the details match.
+    """
+    holders = _holders(holder_names)
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text.strip()):
+        match = _OPENING_NAME_RE.match(sentence) or _ITS_ME_NAME_RE.search(sentence)
+        if match and _somebody_else(match.group(1), holders):
+            return True, match.group(1)
+    return _names_the_holder(text, holders, narrow=True), ""
+
+
+def _names_the_holder(text: str, holders: list[tuple[str, ...]], narrow: bool) -> bool:
+    """The policyholder is spoken of by name as somebody else: "Margaret's son", "calling for Margaret"."""
+    low = text.lower()
+    for words in holders:
+        f, name, last = re.escape(words[0]), _name_pattern(words), words[-1] if len(words) > 1 else ""
+        patterns = [
+            rf"\b{name}'s\s+(?:[\w\-]+\s+)?{_KINSHIP}\b|\b{_KINSHIP}\s+of\s+{name}\b",
+            rf"\bi(?:'m|\s+am)\s+(?:actually\s+|just\s+|only\s+)?{name}'s\s+[a-z]",
+            rf"\b(?:i(?:'m|\s+am)\s+not|this\s+(?:isn't|is\s+not)|it(?:'s\s+not|\s+is\s+not|\s+isn't)|not)\s+{f}\b",
+            rf"\b{name}\s+is\s+(?:my|our)\b|\b{name}\s+is\s+the\s+{_HOLDER_WORD}\b",
+            rf"\b(?:calling|call|asking|ask|here|doing\s+(?:this|it)|speaking|acting|phoning|ringing|enquiring|inquiring|writing)\s+(?:in\s+)?(?:for|on\s+behalf\s+of)\s+{name}\b",
+            rf"\bon\s+behalf\s+of\s+{name}\b|\bon\s+{name}'s\s+behalf\b",
+            rf"\b{name}\s+(?:asked|told|wants|wanted|needs|needed|sent|had)\s+me\b",
+            rf"\b(?:work|working|act|acting|speak|speaking|sign|signing)\s+for\s+{name}\b",
+        ]
+        if last:
+            patterns.append(rf"\b(?:for|behalf\s+of|with)\s+(?:mrs?|ms|miss|mx|dr)\.?\s+{re.escape(last)}\b")
+        if not narrow:
+            # in answer to the role question: "yes, Margaret is", "Margaret is here", "I'm with Margaret"
+            patterns.append(rf"\b{name}\s+is\s*(?=$|[.!?,;]|\s+(?:here|there|busy|sick|ill|unwell|asleep|sleeping|away|out|at|in|not|unable|unavailable|with|next|right)\b)")
+            patterns.append(rf"\bi(?:'m|\s+am)\s+(?:here\s+)?(?:with|from)\s+{name}\b")
+        if any(re.search(pattern, low) for pattern in patterns):
+            return True
+    return False
+
+
+def _is_yes(clause: str) -> bool:
+    if clause.rstrip().endswith("?"):
+        return False  # "Yes?" asks, it does not answer
+    bare = clause.strip(" .,!?;")
+    return bool(bare) and bool(_YES_CLAUSE_RE.fullmatch(bare)) and bool(_YES_WORD_RE.search(bare))
+
+
+def _is_self(clause: str, holders: list[tuple[str, ...]]) -> bool:
+    """The clause is exactly an outright statement, possibly after a yes."""
+    bare = _YES_LEAD_RE.sub("", clause.lower()).strip(" .,!?;")
+    if not bare or clause.rstrip().endswith("?"):
+        return False  # "The policyholder?" and "Me?" repeat the question, they do not answer it
+    if any(re.fullmatch(template, bare) for template in _SELF_TEMPLATES):
+        return True
+    # the policyholder's own name, with nothing else: "Margaret Chen", "this is Margaret", "Chen, Margaret"
+    # A first name can look like a yes word ("Ya Wen"), so the clause is also tried as it stands.
+    for candidate in dict.fromkeys((bare, clause.lower().strip(" .,!?;"))):
+        named = re.fullmatch(
+            r"(?:(?:i'm|i\s+am|this\s+is|it's|it\s+is|my\s+name\s+is|my\s+name's|it's\s+me|it\s+is\s+me|me)\s+)?([a-z][a-z\s\-.]*?)(?:\s+(?:speaking|here))?",
+            candidate,
+        )
+        said = name_tokens(named.group(1)) if named else []
+        for words in holders:
+            whole_name = len(said) >= 2 and len(set(said)) == len(said) and set(said) <= set(words)
+            if whole_name or said == [words[0]]:
+                return True
+    return False
+
+
+def _claim_talk(clause: str, holders: list[tuple[str, ...]]) -> bool:
+    """Talk about the claim, possibly after a yes, with no person in it but the caller."""
+    bare = _YES_LEAD_RE.sub("", clause).strip()
+    low = bare.lower()
+    if not bare or not bare.isascii() or _PERSON_RE.search(bare):
+        return False
+    if any(re.search(rf"\b{re.escape(words[0])}\b", low) for words in holders):
+        return False
+    if not ("?" in bare or QUESTION_START_RE.match(low) or _CLAIM_WORD_RE.search(low)):
+        return False
+    return all(word.lower() in _NOT_A_NAME for word in re.findall(r"(?<!^)(?<![.!?]\s)\b[A-Z][a-z]+\b", bare))
+
+
+def holder_names(data: ClaimsData, party_id: str | None, given: str = "") -> list[str]:
+    """Every name the policyholder goes by.
+
+    Once the record is known these come from the record alone. A name the caller types is theirs
+    to prove: it is compared with these, and never becomes one of them by being said.
+    """
+    party = data.party(party_id) if party_id else None
+    if party:
+        return [party.name, *party.name_aliases]
+    return [given] if given else []
+
+
+def _clause_kind(clause: str, holders: list[tuple[str, ...]]) -> str:
+    """What one clause of the answer is, or "" when it is none of these.
+
+    self      an outright statement: "I'm the policyholder", "that's me", the policyholder's name
+    filler    "well", "thanks", "no problem": allowed next to an answer, never one itself
+    yes       an unmistakable yes with nothing else in the clause
+    soft      a yes word that also begins sentences about something else: "right", "sure"
+    yes+talk  an unmistakable yes followed by talk about the claim: "yes I want to know the status"
+    talk      talk about the claim with no person in it but the caller
+    """
+    if _is_self(clause, holders):
+        return "self"
+    if _is_yes(clause):
+        return "yes" if _FIRM_YES_RE.search(clause) else "soft"
+    if _YES_CLAUSE_RE.fullmatch(clause.strip(" .,!?;")):
+        return "filler"  # "well", "no problem", "thanks": says nothing either way
+    lead = _YES_THEN_TALK_RE.match(clause)
+    if lead and clause[lead.end():].strip(" .,!?;") and _claim_talk(clause[lead.end():], holders):
+        return "yes+talk"
+    return "talk" if _claim_talk(clause, holders) else ""
+
+
+def role_answer(text: str, holder_names: str | list[str] | tuple[str, ...]) -> str:
+    """How the caller answered "are you the policyholder yourself?": "self", "other" or "unclear".
+
+    Read from the caller's own words, whichever engine understood the message. Only "self" opens
+    the gate. "other" sends the caller through the representative steps for good. "unclear" is
+    asked again with a request for a plain yes or no, and after that a person takes over.
+    """
+    holders = _holders(holder_names)
+    cleaned = text.strip()
+    clauses = [c.strip() for c in re.split(r"(?<=[.!?;,])\s+|\s+-\s+|\n+", cleaned) if c.strip(" .,!?;")]
+    kinds = [_clause_kind(c, holders) for c in clauses]
+    # "no problem, yes" and "no idea" are not a no
+    opening = re.sub(r"^\W*no\s+(?:problem|worries|trouble|idea|clue|comment)\b[\s,.!\-]*", "", cleaned.lower())
+    said_no = _polarity(opening) == "no" or bool(_SAYS_NO_RE.search(cleaned))
+    firm = any(kind in {"yes", "self", "yes+talk"} for kind in kinds)
+    only_yes_words = any(kind == "soft" for kind in kinds) and all(kind in {"yes", "soft", "filler"} for kind in kinds)
+    if not said_no and kinds and all(kinds) and (firm or only_yes_words):
+        return "self"
+    if _other_name(cleaned, holders) or _names_the_holder(cleaned, holders, narrow=False):
+        return "other"
+    bare = [bool(_BARE_OTHER_RE.fullmatch(_CORRECTION_LEAD_RE.sub("", _YES_LEAD_RE.sub("", c)).strip(" .,!?;"))) for c in clauses]
+    if bare and bare[-1] and len(clauses) > 1:
+        return "other"  # "I'm the policyholder. Well, actually my mother is": the correction is what stands
+    stated = said_no or any(bare) or bool(
+        _POLICY_IS_ANOTHERS_RE.search(cleaned) or _ACTS_FOR_RE.search(cleaned) or _DESCRIBES_OTHER_RE.search(cleaned)
+    )
+    if stated and not _SELF_CLAIM_RE.search(_SAYS_NO_RE.sub(" ", cleaned)):
+        return "other"
+    return "unclear"
+
+
+# "Let's say I'm the policyholder": a supposition, so the question is asked.
+_SUPPOSING_RE = re.compile(
+    r"\b(?:pretend\w*|assum\w+|suppos\w+|imagin\w+|hypothetical\w*|let's\s+say|let\s+us\s+say|as\s+if|as\s+though|act\s+as|role-?play\w*|what\s+if|treat\s+me\s+as|consider\s+me)\b",
+    _I,
+)
+
+
+def says_policyholder(text: str) -> bool:
+    """ "I'm the policyholder", said outright as a clause of its own, in a message that mentions nobody else.
+
+    The one statement that makes the role question unnecessary. A model's reading is held to it too.
+    """
+    if not POLICYHOLDER_RE.search(text) or MENTIONS_OTHER_RE.search(text) or _SUPPOSING_RE.search(text):
+        return False
+    if re.search(rf"\b{_KINSHIP}\b", text, _I):
+        return False  # a relation or a role came up: "I'm the policyholder. My agent told me to call."
+    return not (_SAYS_NO_RE.search(text) or _POLICY_IS_ANOTHERS_RE.search(text) or _ACTS_FOR_RE.search(text))
+
+
+# ---------------------------------------------------------------- after verification
+# The caller confirmed being the policyholder at the gate. Talk about a husband, a child or a
+# parent is then talk about people on their own policy: "I'm his wife" and "I'm her mother"
+# change nothing. Only an outright contradiction hands the call to a person: the policy is
+# somebody else's, the caller is not the verified person, or they act for that person.
+_NOT_MY_POLICY_RE = re.compile(
+    r"\bi(?:'m|\s+am)\s+not\s+the\s+(?:policy\s?holder|policy\s?owner|account\s+holder)\b|"
+    rf"\b(?:not|isn't|ain't)\s+my\s+(?:own\s+)?policy\b{_NOT_A_NUMBER}|\bpolicy\s+(?:isn't|is\s+not|ain't)\s+mine\b|\bi(?:'m|\s+am)\s+not\s+(?:her|him)\b",
+    _I,
+)
+
+
+def says_not_the_policyholder(text: str, holder_names: str | list[str] | tuple[str, ...]) -> bool:
+    """A verified caller now says outright that the policy is somebody else's, or that they are somebody else."""
+    holders = _holders(holder_names)
+    if _NOT_MY_POLICY_RE.search(text) or _names_the_holder(text, holders, narrow=True) or _other_name(text, holders, first_person_only=True):
+        return True
+    if _SELF_CLAIM_RE.search(text):
+        return False  # "..., but this one is mine", "he's on my plan"
+    return bool(SELF_REP_RE.search(text))
+
+
 # --------------------------------------------------------------------------- the reading
 
 
 def rule_understand(session: Session, text: str, data: ClaimsData, today: date) -> Understanding:
     u = Understanding(source="rules")
+    text = re.sub(r"\b([A-Z])\.(?=\s+[A-Z][a-z])", r"\1", text)  # "David J. Chen": the initial is part of the name
     low = text.lower().strip()
     memory = session.memory
     phase, pending = session.phase, session.pending
@@ -788,20 +1241,32 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
         holder_name = _name_tail(match.group(1) or match.group(2))
         if holder_name:
             own_after_role = _take_name(text[match.end():], True)  # "...'s son David Chen"
+    if not holder_name:
+        match = _POSSESSIVE_ANY.search(text)  # "I'm Jane Doe's secretary": any word after the possessive
+        if match:
+            holder_name = _name_tail(match.group(1))
     third_party = ""
     for pattern in (_CALLING_FOR, _CALLING_ABOUT, _ROLE_FOR, _IS_MY):
         match = pattern.search(text)
         if match and _name_tail(match.group(1)):
             third_party = _name_tail(match.group(1))
             break
+    parent_cue = bool(_PARENT_OF_RE.search(text))  # "I'm her mother", "calling for my son"
     if session.verified:
-        if SELF_REP_RE.search(text):
+        if says_not_the_policyholder(text, holder_names(data, session.party_id, memory.identity.get("full_name") or "")):
             u.caller_role = "representative"
-    elif REP_STRONG_RE.search(text) or holder_name or third_party:
+    elif pending == "role_check":
+        # The agent has just asked "are you the policyholder yourself?". Only that reading counts here.
+        answer = role_answer(text, holder_names(data, session.candidate_id, memory.identity.get("full_name") or ""))
+        if answer == "other":
+            u.caller_role = "representative"
+        elif answer == "self":
+            u.caller_role = "policyholder"
+    elif (REP_STRONG_RE.search(text) and (not parent_cue or REP_STRONG_RE.search(_PARENT_OF_RE.sub(" ", text)))) or holder_name or third_party:
         u.caller_role = "representative"
-    elif POLICYHOLDER_RE.search(text):
+    elif says_policyholder(text):
         u.caller_role = "policyholder"
-    elif (REP_WEAK_CLAIM_RE.search(text) or REP_WEAK_DETAIL_RE.search(text)) and (
+    elif (REP_WEAK_CLAIM_RE.search(text) or REP_WEAK_DETAIL_RE.search(text) or parent_cue) and (
         memory.caller_role == "representative" or not session.verification.get("matched")
     ):
         own = _first_name(_STRONG_NAME, text, False) or _first_name(_WEAK_NAME, text, True)
@@ -821,24 +1286,7 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
             u.caller_role = "representative"
             u.guessed.append("caller_role")  # inferred from how they talk, never said outright
     if not session.verified and u.caller_role == "unknown":
-        if pending == "role_check":  # the agent has just asked "are you the policyholder yourself?"
-            polarity = _polarity(low)
-            holder = (memory.identity.get("full_name") or "").lower()
-            first, _, rest = holder.partition(" ")
-            # "I'm Jane", "Jane Doe": the policyholder's own name is a yes. "It's Jane Doe's policy" is not.
-            names_self = bool(holder) and (
-                low.strip(" .,!") == holder
-                or bool(re.search(
-                    rf"\b(?:i'm|i\s+am|this\s+is|it's|it\s+is|my\s+name\s+is)\s+{re.escape(first)}(?:\s+{re.escape(rest)})?(?![\w']|\s+\w+'s)", low
-                ))
-            )
-            says_no = polarity == "no" or bool(NOT_ME_RE.search(text))
-            says_yes = polarity == "yes" or bool(ITS_ME_RE.search(text)) or names_self
-            if says_no and not says_yes:
-                u.caller_role = "representative"
-            elif says_yes and not says_no and not NEGATION_RE.search(low):
-                u.caller_role = "policyholder"
-        elif MENTIONS_OTHER_RE.search(text):
+        if pending != "role_check" and MENTIONS_OTHER_RE.search(text):
             u.mentions_other = True
     is_rep = u.caller_role == "representative" or (u.caller_role == "unknown" and memory.caller_role == "representative")
 
@@ -850,7 +1298,14 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
 
     match = EMAIL_RE.search(work)
     if match:
-        raw["email"] = match.group(0)
+        before = work[max(0, match.start() - 70): match.start()]
+        someone_elses = (
+            (bool(_THIRD_PARTY_RE.search(before)) and not is_rep)  # "my doctor's office email is ..."
+            or bool(_SENT_TO_RE.search(before))
+            or match.group(0).split("@")[0].lower() in _ROLE_MAILBOXES
+        )
+        if _offered(before, is_rep) and not someone_elses:
+            raw["email"] = match.group(0)
         work = _mask(work, match.span())
     match = CLAIM_ID_RE.search(work)
     if match:
@@ -874,8 +1329,8 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
         work = _mask(work, span)
     match = PHONE_SHAPE_RE.search(work) or PHONE_RE.search(work)
     if match and 10 <= len(re.sub(r"\D", "", match.group(1))) <= 11:
-        before = work[max(0, match.start() - 45): match.start()]
-        if not _CALLBACK_RE.search(before) and not (_THIRD_PARTY_RE.search(before) and not is_rep):
+        before = work[max(0, match.start() - 70): match.start()]
+        if _offered(before, is_rep) and not _CALLBACK_RE.search(before) and not (_THIRD_PARTY_RE.search(before) and not is_rep):
             raw["phone"] = match.group(1)
         work = _mask(work, match.span())
     match = POLICY_RE.search(work)
@@ -894,7 +1349,7 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
     lower_guess = False
     if not self_name and not shouting:
         weak = _first_name(_WEAK_NAME, text, True)
-        first_only = bool(weak) and in_verify and pending == "identity" and weak.lower() not in _COMMON
+        first_only = bool(weak) and in_verify and pending in {"identity", "rep_name", "role_check"} and weak.lower() not in _COMMON
         self_name = weak if len(weak.split()) >= 2 or first_only else ""
         if not self_name and in_verify and pending in {"identity", "rep_name"}:
             # "hi this is jane doe": typed without capitals, so it is only a guess
@@ -921,8 +1376,10 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
             raw["full_name"] = other_name
         if self_name and self_name.lower() == known_holder:
             u.guessed.append("self_is_holder")  # they give the policyholder's name as their own
-        elif len(self_name.split()) >= 2 and self_name.lower() != other_name.lower():
-            u.representative_name = self_name
+        elif self_name and self_name.lower() != other_name.lower() and (
+            len(self_name.split()) >= 2 or pending in {"rep_name", "role_check"} or not memory.representative_name
+        ):
+            u.representative_name = self_name  # one word is a first name or a surname, completed later
     elif self_name:
         raw["full_name"] = self_name
         if lower_guess:
@@ -931,7 +1388,7 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
     # A reply that is only a name, possibly next to other details: "Jane Doe, 0000"
     if in_verify:
         dob_known = "dob" in raw or "dob" in memory.identity
-        known_name = (memory.identity.get("full_name") or "").lower()
+        record_names = holder_names(data, session.candidate_id, memory.identity.get("full_name") or "")
         segments = [seg.strip() for seg in re.split(r"[,;\n]|\band\b|[.!?](?:\s|$)", work) if seg.strip()]
         for piece in segments:
             # a four-digit number standing alone, possibly after a name: "jane doe 0000"
@@ -957,21 +1414,23 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
                     continue
             lower_ok = pending in {"identity", "rep_name"} and (len(segments) == 1 or structured) and not question_like
             name, guess = _bare_name(piece, allow_lower=lower_ok)
-            if not name and pending == "identity" and re.fullmatch(r"\W*[A-Z][a-z\-]{1,20}\W*", piece):
+            if not name and pending in {"identity", "rep_name"} and re.fullmatch(r"\W*[A-Z][a-z\-]{1,20}\W*", piece):
                 word = piece.strip(" .,;:!?")
                 if word.lower() not in _COMMON and word.lower() not in MONTHS:
                     name, guess = word, True  # one capitalised word: part of a name
             if not name:
                 continue
-            if pending == "role_check" and known_name and name.lower() != known_name and not guess:
+            is_holders = any(names_match(name, known) for known in record_names)
+            if pending == "role_check" and record_names and not is_holders and not guess:
                 # asked "are you the policyholder yourself?", they answer with another name
                 u.representative_name = u.representative_name or name
                 u.caller_role = "representative"
-            elif pending == "rep_name":
-                if name.lower() == known_name:
+            elif pending == "rep_name" or (is_rep and bool(session.rep_name_refused) and not guess):
+                # asked for their own name, or correcting the one that was not found ("sorry, David Chen")
+                if is_holders:
                     u.guessed.append("self_is_holder")
-                else:
-                    u.representative_name = u.representative_name or name
+                elif len(name.split()) > len(u.representative_name.split()):
+                    u.representative_name = name  # "Chen. David Chen.": the fuller reading wins
             elif "full_name" not in raw and not (is_rep and u.representative_name == name):
                 raw["full_name"] = name
                 if guess:

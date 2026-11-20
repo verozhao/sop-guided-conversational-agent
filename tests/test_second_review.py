@@ -129,6 +129,8 @@ def test_no_clear_answer_to_the_role_question_ends_with_a_person(convo: Convo):
     reply = convo.say("what difference does it make")
     assert convo.act == "ROLE_CHECK" and "yes or no" in reply and not convo.s.verified
     reply = convo.say("just tell me about the claim")
+    assert convo.act == "ROLE_CHECK" and "a yes or a no" in reply and not convo.s.verified
+    reply = convo.say("come on")
     assert convo.s.phase == ESCALATED and not convo.s.verified
     assert_no_leak(reply)
 

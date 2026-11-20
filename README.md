@@ -65,6 +65,8 @@ The UI has a **Demo script** menu. Pick a script and press **Send next line** to
 | Memory | A claim hint and an email preference given before verification, used later |
 | Ambiguous claim | Disambiguation, then switching to a second claim |
 
+In three of the scripts the caller does not say who they are, so the agent asks "are you the policyholder yourself?" once the details match, and the script answers yes. The demo test case says "I'm the policyholder" in its first message and is not asked.
+
 A link such as `/?script=1&auto=1` plays a script on load. `&turns=2` stops after two lines.
 
 The same scenarios run in a terminal, offline:
@@ -91,7 +93,7 @@ David Chen is listed as Margaret Chen's authorized representative. The fixtures 
 
 | Expected | What happens | Where to see it |
 |---|---|---|
-| Extracts identity and verifies | Name, date of birth and SSN last four match one record. Three of five is the rule. The policy number helps find the record and does not count as one of the three | Safety gates panel |
+| Extracts identity and verifies | Name, date of birth and SSN last four match one record. Three of five is the rule. The policy number helps find the record and does not count as one of the three. The message also says "I'm the policyholder", so who is calling is settled in the same turn | Safety gates panel |
 | No claim detail before verification | Until the gate opens, no claim tool is allowed and the reply writer receives no claim data | "Facts the reply was allowed to use" in the Last turn panel |
 | Remembers the hint | Intent and "denied healthcare claim from January" are stored while still in VERIFY_ID | Memory panel, tagged with the phase and turn where it was heard |
 | Uses the hint after verification | RESOLVE_INTENT filters Margaret's four claims down to CL-2048 without asking | Phase path `VERIFY_ID -> RESOLVE_INTENT -> PROCESS_CASE`, and "Memory used" |
@@ -172,11 +174,27 @@ For the example in the brief ("I already told you who I am. This is ridiculous. 
 
 The question about the denial is saved and answered as soon as verification completes.
 
+### Who is calling
+
+Three matching details say whose policy it is. They do not say who is calling, and a relative often knows them. So once the details match, the agent asks "are you the policyholder yourself?" before anything is shared. The question is skipped only when the caller has already said so outright ("I'm the policyholder", "it's my own policy") in a message that mentions nobody else, as the demo test case does.
+
+The answer is read from the caller's own words, whichever engine understood the message:
+
+| The caller | Examples | What happens |
+|---|---|---|
+| says yes plainly, or states outright that the policy is theirs | "Yes", "Yes, I am. Why was it denied?", "That's me", "Margaret Chen" | The gate opens |
+| says no, gives another name as their own, speaks of the policyholder as somebody else, or describes themselves as that person's relative or helper | "No", "I'm David Chen", "it's my mom's policy", "Yes, I'm her son", "I work for Margaret" | The three representative checks below. A later yes does not undo this |
+| says anything else | "I'm the other insured", "I'm on the policy too", "Yes, I'm his wife and the policyholder", "why do you ask?" | Asked again for a plain yes or no, with the reason. After two more unclear answers a person takes over |
+
+A yes is defined by what it may contain: yes words, an exact statement, and talk about the claim with no other person in it. Wording the rules have never seen is asked about and cannot open the gate. A model's reading can send a caller to the representative checks. It can never open the gate, and a model's "policyholder" counts only when the caller's own words are the exact statement.
+
+"I'm her mother" and "I'm calling for my son" are asked about and never assumed either way. A policyholder says them about a child on their own plan, and a parent says them when calling for a grown child. A name given before the details ("David here.") and a statement such as "I work for Margaret" count as soon as the record is known. After verification, talk about family on the caller's own plan changes nothing. An outright contradiction ("the policy isn't mine", "I'm calling for Margaret", "I'm David") hands the call to a person.
+
 ### Representative callers and consent
 
 Someone calling for a policyholder has to pass three checks: the policyholder's details match, the caller is listed as an authorized representative, and the policyholder approves a consent request. The consent status comes from `consent_scenarios.json` (choose `default` or `timeout` in the UI before starting a conversation). Until consent is approved the session stays in VERIFY_ID. A request that expires is not sent again: the caller is offered a person, and then handed to one.
 
-This gate depends on what the caller says about themselves ("I'm her husband", "I'm calling for Margaret Chen"). When that is unclear, the agent asks "are you the policyholder yourself?" once the details match and before anything is shared. It is unclear when a caller mentions somebody else without saying who is calling ("my wife asked me to call"), and when the role could only be inferred from the wording ("calling about my son's claim", which a parent says about a claim on their own policy as often as a third party does). A yes goes on as the policyholder and a no goes through the three checks above. A question in reply is answered with the reason and the question is asked once more, and after a second unclear answer a person takes over. Someone who presents three correct details as their own and mentions nobody else is treated as the policyholder, as the three-detail rule says. A caller verified as the policyholder who later says they are acting for someone else is handed to a person.
+A representative gives their own full name. A middle name or initial is fine ("David J. Chen" is the listed David Chen), and a typing mistake can be corrected. A different name after a refusal goes to a person. So does a caller who gives no name after several tries, or who then says they are the policyholder. No step repeats without end.
 
 ### Output guard
 
@@ -233,7 +251,7 @@ server/app.py                FastAPI app
 server/static/index.html     test UI
 scripts/demo.py              scripted conversations in the terminal, offline
 scripts/live_check.py        the same conversations against the real model, with a spending cap
-tests/                       744 tests, all offline
+tests/                       1400 tests, all offline
 ```
 
 ## Tests
@@ -245,7 +263,7 @@ tests/                       744 tests, all offline
 
 The suite is offline. It never reads `.env` and removes any token from the environment, so it cannot spend money.
 
-The suite covers the demo case, the verification gate, the bonus scenarios, scope control, claim resolution, the workflow paths, the email step, representative consent, harness enforcement (tool gating, illegal transitions), the output guard against leaking or overclaiming model replies, and the shape of the request sent to the Anthropic API. `tests/test_review_findings.py`, `tests/test_second_review.py` and `tests/test_final_review.py` hold a regression test for each problem found by the three code reviews before submission. `ruff check .` passes with the configuration in `ruff.toml`.
+The suite covers the demo case, the verification gate, the bonus scenarios, scope control, claim resolution, the workflow paths, the email step, representative consent, harness enforcement (tool gating, illegal transitions), the output guard against leaking or overclaiming model replies, and the shape of the request sent to the Anthropic API. `tests/test_review_findings.py`, `tests/test_second_review.py` and `tests/test_final_review.py` hold a regression test for each problem found by the three code reviews before submission, and `tests/test_cold_check.py` and `tests/test_third_check.py` do the same for three independent checks of the finished version. `ruff check .` passes with the configuration in `ruff.toml`.
 
 ## Checked against the live model
 
@@ -260,14 +278,14 @@ The suite covers the demo case, the verification gate, the bonus scenarios, scop
 
 Twelve scenarios are included: the seven demo scripts plus five written for the model (spoken-style language such as "bday is march fifteenth nineteen eighty five", prompt injection before verification, an anxious caller with a missing document, a policyholder who mentions a relative, and a spouse who has three correct details but no consent). The offline mode runs nine of them. The other three need a model.
 
-Results on 2026-11-20, all twelve scenarios:
+Results on 2026-11-20, all twelve scenarios, on the version before the role question became a standard step:
 
 | Model | Turns | Outcome checks | Replies written by the model | Median time per turn | Cost per turn |
 |---|---|---|---|---|---|
 | `claude-opus-5-5` (default) | 59 | all passed | 56 of 59 | 4.6 s | about $0.02 |
 | `claude-haiku-5-5` | 59 | all passed | 55 of 59 | 2.1 s | under $0.001 |
 
-The Haiku run is on the final version. The full Opus run was made before the last adjustments to the role question and to the offline rules. The three scenarios about who is calling were then run again on Opus, and all 12 turns passed with every reply written by the model. The replies not written by the model are the out-of-scope declines, which use fixed wording by design (three or four per run). The output guard rejected no reply in these runs. `claude-sonnet-5-5` (12 turns) and `claude-fable-5-2` (1 turn) passed on an earlier version and were not run again.
+These runs used the scripts as they were then, 59 turns in all. Since then the role question is asked whenever the caller has not said who they are, which adds one turn to five of the scripts (64 turns now). The current version passes the same outcome checks on the offline engine (`--offline`, nine scenarios, 45 turns), and tests with a scripted model cover the model path of the new step: a model's reading can never open the gate. The current version has not been run against the live API. The replies not written by the model are the out-of-scope declines, which use fixed wording by design (three or four per run). The output guard rejected no reply in these runs. `claude-sonnet-5-5` (12 turns) and `claude-fable-5-2` (1 turn) passed on an earlier version and were not run again.
 
 The Docker image was built and run: the container passes its health check, serves all seven demo scripts, and answers through the model when the token is passed with `-e`.
 
@@ -278,5 +296,13 @@ The Docker image was built and run: the container passes its health check, serve
 - Memory keeps one claim reference at a time. Two questions about two different claims asked before verification are both remembered, and answered for the claim named last.
 - The limit on failed identity attempts is per conversation. A new conversation starts a new count, and limiting attempts across conversations would need caller identification that this demo does not have.
 - A policyholder is told which of their details matched ("I've confirmed your full name"), which makes verification easier to complete and also tells a guesser which values were right. A representative is not told. Wrong values are limited by the attempt count.
+- The gate cannot detect a lie. Someone who knows three details and answers the role question with a plain yes is treated as the policyholder. What the gate rules out is a third party getting through by describing themselves truthfully, or by wording the rules did not expect.
+- Talk about the claim may stand next to a yes ("Yes, why was it denied?"). Whether another person is in it is decided by a list of words for people. A caller who says yes and then names someone with a word the list lacks ("yes, about my moms claim", "yes, for my boss") is taken at their yes.
+- "I'm the policyholder" in an opening counts as the outright statement also when the same message takes it back in an unusual way ("I'm the policyholder? No.").
+- A policyholder who introduces herself by a nickname the record does not have ("Yes, I'm Maggie") is treated as another person and handed to a human. A representative's name is read in the usual forms ("David Chen", "David", then "Chen"). "My first name is David, last name Chen" is not read, and that step then ends with a person.
+- The role question needs an answer in English: an outright statement or a plain yes. A yes in another language, or with words next to it that cannot be placed, is asked again, also when a model is used. A policyholder who answers with more than a yes ("Yes, I'm the policyholder. My husband is covered under my plan.") is therefore asked once more.
+- A caller who answers the role question as somebody's relative ("yes, I'm her husband") goes through the representative checks for the rest of the call. A policyholder who meant a dependant on their own plan is handed to a person when they then give the policyholder's name as their own. The agent does not settle that contradiction itself.
+- A phone number or an email address counts as an identity detail only when it is offered as the caller's own ("my phone is ...", a value on its own, an item in a list of details). Mentioned in any other sentence it is not read, so it neither matches nor counts as a failed attempt.
+- After verification the call goes to a person when the caller says outright that the policy is somebody else's or that they are somebody else. The usual ways of saying so are recognised, and some will be missed. Talk about family members does not hand the call off, since a policyholder has dependants.
 - Sessions live in memory. Email delivery is simulated: the message appears in the Outbox panel.
 - There is no hosted instance. The image runs on any container host and honours `PORT`.

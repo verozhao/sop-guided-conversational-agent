@@ -79,7 +79,7 @@ def test_model_reading_drives_the_same_policy(agent: Agent):
     )
     llm = scripted([DEMO_READING], [good_reply])
     convo = Convo(agent, llm=llm)
-    reply = convo.say("(any wording at all)")
+    reply = convo.say(DEMO_UTTERANCE)
     assert reply == good_reply
     assert convo.s.verified and convo.s.phase == PROCESS_CASE and convo.s.case_id == "CL-2048"
     assert convo.trace["engine"] == "llm:scripted"
@@ -138,7 +138,7 @@ def test_guard_replaces_a_model_reply_that_discloses_or_overclaims(agent: Agent,
 def test_guard_rejects_ungrounded_values_after_verification(agent: Agent, hallucination: str):
     llm = scripted([DEMO_READING], [hallucination])
     convo = Convo(agent, llm=llm)
-    reply = convo.say("...")
+    reply = convo.say(DEMO_UTTERANCE)
     assert convo.s.verified
     assert convo.trace["guard"]["ok"] is False
     assert reply != hallucination and "CL-2048" in reply
@@ -167,7 +167,7 @@ def test_a_model_that_restates_the_current_claim_does_not_derail_the_email_offer
         ["ok", "Would you like a summary by email, or shall we skip it?", "Should I send it or skip it?", "Sent. Take care!"],
     )
     convo = Convo(agent, llm=llm)
-    convo.say("...")
+    convo.say(DEMO_UTTERANCE)
     convo.say("no that's all")
     assert convo.s.phase == "POST_PROCESS" and convo.act == "EMAIL_OFFER"
     convo.say("hmm")
@@ -182,7 +182,7 @@ def test_model_cannot_select_another_policyholders_claim(agent: Agent):
         ["ok", "Claim CL-3001 was denied because the diagnosis report is missing."],
     )
     convo = Convo(agent, llm=llm)
-    convo.say("...")
+    convo.say(DEMO_UTTERANCE)
     reply = convo.say("what about CL-3001")
     assert convo.act == "CLAIM_ID_NOT_FOUND"
     # the other policyholder's data was never given to the model ...

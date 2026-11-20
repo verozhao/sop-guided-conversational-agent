@@ -51,7 +51,7 @@ def test_a_clear_yes_to_the_role_question_goes_on(convo: Convo, answer: str):
 
 def test_an_answer_that_is_neither_yes_nor_no_is_asked_again(convo: Convo):
     convo.say(MENTIONS_WIFE)
-    reply = convo.say("yes, why wouldn't I be?")
+    reply = convo.say("why wouldn't I be?")
     assert convo.act == "ROLE_CHECK" and not convo.s.verified and "yes or no" in reply
 
 
@@ -75,7 +75,7 @@ def test_the_role_question_is_asked_on_the_model_path_too(agent: Agent):
     assert_no_leak(reply)
     plain = Convo(agent, llm=ScriptedLLM(on_json=lambda *_: details, on_text=lambda *_: "Thank you, you're verified. Which claim?"))
     plain.say("Margaret Chen, 1985-03-15, 4472")
-    assert plain.s.verified  # nobody else was mentioned, so nothing is asked
+    assert plain.act == "ROLE_CHECK" and not plain.s.verified  # asked whenever the caller has not said it
 
 
 def test_my_wife_asked_me_to_call_gets_the_role_question_as_the_readme_says(convo: Convo):
@@ -315,10 +315,20 @@ def test_a_question_about_the_role_question_is_not_read_as_a_no(convo: Convo, an
     assert "yes or no" in reply and "approved" in reply  # asked again, with the reason
 
 
-@pytest.mark.parametrize("answer", ["it's mine", "the policy is in my name", "I'm Margaret", "Margaret Chen", "obviously", "I'm the one on the policy"])
+@pytest.mark.parametrize("answer", ["it's mine", "the policy is in my name", "I'm Margaret", "Margaret Chen", "obviously", "that's me", "Yes, speaking"])
 def test_everyday_ways_of_saying_yes_to_the_role_question(convo: Convo, answer: str):
     convo.say(MENTIONS_WIFE)
     convo.say(answer)
+    assert convo.s.verified and convo.s.memory.caller_role == "policyholder"
+
+
+@pytest.mark.parametrize("answer", ["I'm the one on the policy", "my name is on the policy", "I'm the insured", "I'm covered under it"])
+def test_being_on_the_policy_is_not_holding_it(convo: Convo, answer: str):
+    # A dependant is on the policy and insured too. These are asked again, and a plain yes then settles it.
+    convo.say(MENTIONS_WIFE)
+    convo.say(answer)
+    assert convo.act == "ROLE_CHECK" and not convo.s.verified
+    convo.say("yes")
     assert convo.s.verified and convo.s.memory.caller_role == "policyholder"
 
 
@@ -340,13 +350,30 @@ def test_everyday_ways_of_saying_no_to_the_role_question(convo: Convo, answer: s
 )
 def test_calling_for_a_thing_is_not_calling_for_a_person(convo: Convo, opening: str):
     convo.say(f"{opening} Margaret Chen, 1985-03-15, 4472")
-    assert convo.s.verified and convo.s.memory.caller_role == "unknown"
+    assert convo.s.verified and convo.s.memory.caller_role == "policyholder"  # asked, answered yes, never taken for a representative
 
 
-@pytest.mark.parametrize("opening", ["I'm calling for my daughter.", "It's for my mom.", "I'm calling for a friend,", "I'm calling for the policyholder,", "I'm calling for her."])
+@pytest.mark.parametrize("opening", ["I'm calling for my mother.", "It's for my mom.", "I'm calling for a friend,", "I'm calling for the policyholder,", "I'm calling for her."])
 def test_calling_for_a_person_is_still_a_representative(convo: Convo, opening: str):
     convo.say(f"{opening} Margaret Chen, 1985-03-15, 4472")
     assert not convo.s.verified and convo.s.memory.caller_role == "representative" and convo.act == "ASK_REP_NAME"
+
+
+@pytest.mark.parametrize(
+    "opening",
+    ["I'm calling for my daughter.", "I'm calling on behalf of my son.", "I'm her mother.", "I'm calling on behalf of my son. I'm Margaret Chen, born 1985-03-15, last four 4472."],
+)
+def test_a_parent_is_asked_who_is_calling_never_assumed_either_way(agent: Agent, opening: str):
+    # A policyholder says this about a child on their own plan, and so does a parent calling for a grown child.
+    details = "" if "Margaret" in opening else " Margaret Chen, 1985-03-15, 4472"
+    for answer, verified in (("yes", True), ("No, I'm calling for her", False)):
+        convo = Convo(agent, scenario="timeout", answers_role=False)
+        reply = convo.say(f"{opening}{details}")
+        assert convo.act == "ROLE_CHECK" and not convo.s.verified
+        assert_no_leak(reply)
+        convo.say(answer)
+        assert convo.s.verified is verified
+        assert convo.s.memory.caller_role == ("policyholder" if verified else "representative")
 
 
 @pytest.mark.parametrize(
@@ -420,3 +447,55 @@ def test_being_patient_is_not_mentioning_a_patient(convo: Convo):
     other = Convo(convo.agent)
     other.say("I'm calling about a patient. Margaret Chen, 1985-03-15, 4472")
     assert other.act == "ROLE_CHECK" and not other.s.verified
+
+
+# ---------------------------------------------------------------- found by re-reading the brief before submission
+
+
+def test_a_policy_number_is_never_read_as_a_name(convo: Convo):
+    reply = convo.say("Is my policy number enough? It's POL-9921")
+    m = convo.s.memory
+    assert m.identity.get("policy_number") == "POL-9921" and "full_name" not in m.identity
+    assert convo.act == "VERIFY_EXPLAIN" and "doesn't count" in reply
+
+
+def test_the_car_thing_points_at_the_auto_claim(verified: Convo):
+    reply = verified.say("actually what about the car thing?")
+    assert verified.s.case_id == "CL-2102" and "not something I can do" not in reply
+
+
+def test_just_answer_my_question_is_pushback_on_verification(convo: Convo):
+    convo.say("I'm not telling you anything about me")
+    assert convo.act == "VERIFY_PERSUADE_1"
+    reply = convo.say("No. Just answer my question.")
+    assert convo.act == "VERIFY_PERSUADE_2" and "human representative" in reply and not convo.s.verified
+    other = Convo(convo.agent)
+    other.say("Can I just answer two of them?")  # a question about the step, answered as one
+    assert other.act == "VERIFY_EXPLAIN" and other.s.refusal_count == 0
+
+
+def test_try_before_a_number_is_an_answer(convo: Convo):
+    convo.run("Margaret Chen, born 1985-03-15", "0000")
+    assert convo.s.failed_attempts == 1
+    convo.say("try 4472")
+    assert convo.s.verified
+
+
+REP_OPENING = "I'm David Chen, calling for my mother Margaret Chen. Her date of birth is 1985-03-15 and her phone is 650-521-2836."
+
+
+def test_a_question_about_consent_is_answered_before_the_status_is_checked_again(convo: Convo):
+    convo.say(REP_OPENING)
+    assert convo.act == "CONSENT_REQUESTED"
+    reply = convo.say("Why do you need her consent? I'm her son.")
+    assert convo.act == "CONSENT_PENDING" and not convo.s.verified and "check_consent_status" not in convo.tools
+    assert "private information" in reply and "still waiting" in reply
+    assert_no_leak(reply)
+    convo.say("ok she approved it")
+    assert convo.s.verified and "check_consent_status" in convo.tools
+
+
+def test_a_caller_who_says_it_was_approved_gets_the_check_even_with_a_question(convo: Convo):
+    convo.say(REP_OPENING)
+    convo.say("She approved it, why is this taking so long?")
+    assert convo.s.verified

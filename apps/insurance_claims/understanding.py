@@ -210,9 +210,12 @@ UNDERSTANDING_SCHEMA: dict[str, Any] = {
 # caller's own words, so it holds whichever engine read the message.
 MENTIONS_OTHER_RE = re.compile(
     r"\b(?:mother|mom|mum|father|dad|wife|husband|son|daughter|spouse|brother|sister|grandmother|grandfather|"
-    r"grandma|grandpa|aunt|uncle)\b|\b(?:my|our|a|the)\s+(?:partner|client|friend|neighbou?r|patient)\b|"  # not "I've been patient"
-    r"\b(?:she|he)\s+(?:asked|wants|wanted|needs|can't|cannot|is\s+the|told\s+me)\b|"
-    r"\bfor\s+(?:her|him|them)\b|\basked\s+me\s+to\s+call\b",
+    r"grandma|grandpa|aunt|uncle|parents?|kids?|child(?:ren)?|niece|nephew|cousin|grandson|granddaughter|grandkid|stepson|stepdaughter|"
+    r"hubby|wifey|girlfriend|boyfriend|family|relatives?|guardian|caregiver|caretaker|carer|secretary|nurse)\b|"
+    r"\b(?:my|our|a|the)\s+(?:[\w\-]+\s+)?(?:partner|client|friend|neighbou?r|patient|colleague|employee|assistant|lawyer|attorney)\b|"  # not "I've been patient"
+    r"\b(?:she|he|her|hers|him|his)\b|\bfor\s+them\b|\basked\s+me\s+to\s+call\b|\bon\s+behalf\b|"
+    # "I'm the hubby", "I'm the executor": a description of oneself that is not "the policyholder"
+    r"\bi(?:'m|\s+am)\s+the\s+(?!(?:[\w\-]+\s+)?(?:policy\s?holder|policy\s?owner|insured|account|member|owner|one|person|same|customer|caller)\b)[a-z]",
     re.I,
 )
 # "my date of birth is ...": the caller is giving their own details.

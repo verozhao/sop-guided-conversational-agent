@@ -12,7 +12,7 @@ from apps.insurance_claims.guard import claims_verified
 from apps.insurance_claims.normalize import norm_name
 from apps.insurance_claims.state import CLOSED, POST_PROCESS, PROCESS_CASE, VERIFY_ID
 
-from .conftest import Convo
+from .conftest import DEMO_UTTERANCE, Convo
 from .test_llm_path import DEMO_READING, reading, scripted
 
 
@@ -73,7 +73,7 @@ def test_a_difference_of_two_grounded_amounts_is_accepted(agent: Agent):
     for reply, accepted in ((gap, True), (wrong, False)):
         llm = scripted([DEMO_READING, payment], ["ok", reply])
         convo = Convo(agent, llm=llm)
-        convo.say("...")
+        convo.say(DEMO_UTTERANCE)
         out = convo.say("what about my dental claim, how much was paid?")
         assert convo.s.case_id == "CL-1899"
         assert (out == reply) is accepted, convo.trace["guard"]
@@ -109,7 +109,7 @@ def test_a_question_at_the_email_offer_is_answered_before_any_email_is_sent(agen
         ["ok", "Would you like a summary by email, or shall we skip it?", "The deadline is March 18, 2026.", "Shall I send the summary now, or skip it?", "Sent. Take care!"],
     )
     convo = Convo(agent, llm=llm)
-    convo.say("...")
+    convo.say(DEMO_UTTERANCE)
     convo.say("that's all")
     assert convo.s.phase == POST_PROCESS
 

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .normalize import names_match, norm_claim_id
+from .normalize import name_tokens, names_match, norm_claim_id
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -34,6 +34,12 @@ class Policyholder:
     @property
     def first_name(self) -> str:
         return self.name.split()[0]
+
+
+def _with_middle_name(listed: str, given: str) -> bool:
+    """The same first and last name with a middle name or initial in between: "David J. Chen" is David Chen."""
+    a, b = name_tokens(listed), name_tokens(given)
+    return len(a) >= 2 and len(b) > len(a) and b[0] == a[0] and b[-1] == a[-1]
 
 
 class ClaimsData:
@@ -85,7 +91,7 @@ class ClaimsData:
 
     def find_representative(self, party_id: str | None, rep_name: str) -> dict[str, Any] | None:
         for rep in self.representatives:
-            if rep["buyer_party_id"] == party_id and names_match(rep["rep_name"], rep_name):
+            if rep["buyer_party_id"] == party_id and (names_match(rep["rep_name"], rep_name) or _with_middle_name(rep["rep_name"], rep_name)):
                 return rep
         return None
 

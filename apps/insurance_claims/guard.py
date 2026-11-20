@@ -129,31 +129,72 @@ _CONFIRMS_RE = re.compile(
     re.I,
 )
 # After verification a status has to be one the facts give.
+_ADVERBS = r"(?:(?:now|still|currently|just|already|since|finally|officially)\s+)*"
 _STATUS_OF_CLAIM_RE = re.compile(
-    r"\b(?:claim|appeal)\b[^.?!,;]{0,30}?\b(?:has been|was|is|got)\s+(?:now\s+|still\s+|currently\s+)?"
-    r"(approved|denied|paid|closed|open|pending|settled|rejected)\b",
+    rf"\b(?:claim|appeal|denial|decision)\b[^.?!,;]{{0,30}}?\b(?:has\s+{_ADVERBS}been|was|is|got)\s+{_ADVERBS}"
+    r"(approved|denied|paid|closed|open|pending|settled|rejected)\b|"
+    rf"\b(?:it|that|this|everything)(?:'s|\s+is|\s+was|\s+has\s+{_ADVERBS}been)\s+{_ADVERBS}(?:all\s+)?(approved)\b",
+    re.I,
+)
+# Outcomes only the insurer can produce. A reply may state one only when the facts use that word.
+_OUTCOME_RE = re.compile(
+    rf"\b(?:has|have|had|is|are|was|were|it's|that's|been|got|gets)\s+{_ADVERBS}(?:been\s+)?{_ADVERBS}"
+    r"(overturned|reversed|reopened|re-opened|expedited|waived|reprocessed|reinstated|extended|prioriti[sz]ed)\b|"
+    r"'s\s+(?:now\s+|just\s+|already\s+)?been\s+(overturned|reversed|reopened|re-opened|expedited|waived|reprocessed|reinstated|extended)\b",
+    re.I,
+)
+# "Your appeal has been submitted", "the appeal is filed": nothing on this line files anything.
+_FILED_RE = re.compile(
+    rf"\b(?:appeal|complaint|dispute|reconsideration|request\s+for\s+(?:review|reconsideration))\s+(?:has|have)\s+{_ADVERBS}been\s+"
+    r"(?:submitted|filed|opened|started|lodged|raised|logged|received|escalated)\b|"
+    r"\b(?:appeal|complaint|dispute)\s+is\s+(?:now\s+|already\s+)?(?:filed|submitted|lodged|underway|under\s+way|in\s+progress)\b",
     re.I,
 )
 _SENT_RE = re.compile(
-    r"\b(?:i|we)(?:'ve| have)?\s+(?:just\s+|now\s+|already\s+|gone ahead and\s+|went ahead and\s+)*(?:sent|emailed)\b|"
-    r"\bhas (?:just |now |already )?been (?:sent|emailed|delivered)\b|\bis on its way\b|"
+    r"\b(?:i|we)(?:'ve| have)?\s+(?:just\s+|now\s+|already\s+|gone ahead and\s+|went ahead and\s+)*(?:sent|emailed|texted|messaged)\b|"
+    r"\bhas (?:just |now |already )?been (?:sent|emailed|delivered)\b|(?:\bis|'s)\s+(?:now\s+|already\s+)?on\s+(?:its|the)\s+way\b|"
     r"\b(?:e-?mail|summary|message)\s+(?:was|were)\s+(?:just\s+)?(?:sent|emailed|delivered)\b|"
     r"\b(?:e-?mail|summary|message)\s+(?:just\s+)?(?:sent|delivered)(?=\s*[.!,]|\s*$)|"
     r"\b(?:e-?mail|summary|message)\s+(?:went|has gone|is going)\s+out\b|\bin your inbox\b",
     re.I,
 )
 _TRANSFER_RE = re.compile(
-    r"\b(?:i'm|i am|i'll be|we're)\s+(?:now\s+)?(?:transferring|connecting|handing)\b|"
-    r"\bi(?:'ve| have)\s+(?:transferred|connected|escalated|handed)\b|"
+    r"\b(?:i'm|i am|i'll be|we're)\s+(?:now\s+)?(?:transferring|connecting|handing|escalating)\b|"
+    r"\bi(?:'ve| have)\s+(?:transferred|connected|escalated|handed)\b|\b(?:has|have)\s+(?:now\s+|just\s+)?been\s+(?:escalated|transferred)\b|"
     r"\byou(?:'re| are) (?:now )?being (?:transferred|connected)\b|"
     r"\b(?:let me|i'll|i will)\s+(?:now\s+)?(?:transfer you|connect you|put you through)\b[^.?!]*"
     r"\b(?:now|right away|right now|please hold|one moment|hold on)\b",
     re.I,
 )
 # "arrange for a human representative" and "update you" are things the assistant does do.
+_OUTSIDE = r"(?:your|the)\s+(?:[\w\-]+\s+)?(?:provider|doctor|dentist|hospital|clinic|pharmacy|employer|adjuster|reviewers?|team|office|insurer)"
+_ASKED_FOR = r"(?:[\w\-]+\s+)?(?:extension|review|reopening|records?|documents?|reports?|exception|waiver|callback|appeal|priority)"
 _ACTIONS = (
     r"arrange(?!\s+for\s+(?:a|an|the)\s+(?:human|person|representative|claims))|set up|schedule|submit|file|upload|approve|"
-    r"reopen|re-open|expedite|waive|extend|process|update(?!\s+you\b)|change|cancel|fax|mail|resend|fix|reverse|overturn"
+    r"reopen|re-open|expedite|waive|extend|process|update(?!\s+you\b)|change|cancel|fax|mail|resend|fix|reverse|overturn|"
+    r"mark|flag|prioriti[sz]e|put\s+in|add\s+(?:a|the)\s+note|make\s+(?:the|that|this|a)\s+change|"
+    r"(?:open|start|lodge|raise|log)\s+(?:a|an|the|your)\s+(?:appeal|complaint|dispute|ticket|case|review|request)|"
+    rf"request\s+(?:the|your|an?|those|these)\s+{_ASKED_FOR}|"
+    rf"(?:reach\s+out\s+to|contact|call|phone|message|text|write\s+to|e-?mail)\s+{_OUTSIDE}"
+)
+# The same things said as under way ("I'm opening an appeal for you now").
+_ACTION_NOW_RE = re.compile(
+    r"\bI(?:'m| am)\s+(?:now\s+|just\s+|currently\s+|going\s+ahead\s+and\s+)?(?:opening|filing|submitting|starting|lodging|raising|"
+    r"expediting|reopening|re-opening|marking|flagging|processing|updating(?!\s+you\b)|changing|cancell?ing|extending|waiving|approving|"
+    r"reversing|overturning|arranging|scheduling|putting\s+in|adding\s+a\s+note)\b",
+    re.I,
+)
+# Reaching out to third parties or to back-office staff, reported as done. Not checked on a
+# hand-off turn, where passing things on is exactly what happened.
+_OUTREACH_DONE_RE = re.compile(
+    r"\bI(?:'ve| have)?\s+(?:just\s+|already\s+|now\s+|gone ahead and\s+|went ahead and\s+)*(?:"
+    r"flagged|marked|prioriti[sz]ed|lodged|put\s+in\s+(?:a|an|the)|added\s+(?:a|an|the)\s+note|made\s+(?:the|that|this|a)\s+change|"
+    r"(?:raised|logged|opened|started)\s+(?:a|an|the|your)\s+(?:appeal|complaint|dispute|ticket|case|review|request)|"
+    rf"requested\s+(?:a|an|the|your|those|these)\s+{_ASKED_FOR}|"
+    r"asked\s+(?:the|our|my|a|your)\s+(?:[\w\-]+\s+)?(?:team|reviewers?|adjuster|supervisor|manager|department|colleagues?|provider|doctor|hospital|clinic)|"
+    rf"(?:contacted|called|phoned|written\s+to|reached\s+out\s+to)\s+{_OUTSIDE}|"
+    rf"forwarded\b[^.!?]{{0,50}}\bto\s+{_OUTSIDE})",
+    re.I,
 )
 # First-person offers of an action the assistant has no means to take ("I can help arrange a fax").
 _ACTION_OFFER_RE = re.compile(
@@ -170,7 +211,9 @@ _ACTION_DONE_RE = re.compile(
 )
 # Outcomes nobody on this line can promise.
 _PROMISE_RE = re.compile(
-    r"\bwill be (?:approved|paid|reimbursed|overturned|reversed)\b|\bguarantee[ds]?\b|"
+    r"\bwill be (?:[\w\s]{0,25}?\band\s+)?(?:approved|paid|reimbursed|overturned|reversed|reprocessed|reopened|reinstated|refunded|accepted|granted)\b|"
+    r"\bguarantee[ds]?\b|\b(?:is|are)\s+going\s+to\s+(?:succeed|go\s+through|be\s+(?:approved|paid|overturned|reversed|accepted|granted))\b|"
+    r"\bwill\s+(?:succeed|go\s+through)\b|\bconsider\s+it\s+done\b|"
     r"\b(?:you'll|you will)\s+(?:definitely\s+|certainly\s+)?(?:get|be)\s+(?:paid|reimbursed|approved|covered)\b|"
     r"\b(?:definitely|certainly|surely)\s+(?:be\s+|get\s+)?(?:approved|paid|reimbursed|covered|overturned)\b|"
     r"\bmake sure\b[^.?!]{0,40}\b(?:approved|paid|overturned|reversed)\b|\bgets? approved\b",
@@ -214,6 +257,26 @@ _REPORTED_RE = re.compile(
     r"(?:saying|says|said|claims|claiming|claimed|stating|states)\s+(?:that\s+)?$",
     re.I,
 )
+
+
+# "If the denial is overturned ...", "Make sure the appeal is filed by ...": a condition or an
+# instruction earlier in the same sentence means the outcome is not being reported.
+_SENTENCE_CONDITION_RE = re.compile(
+    r"\b(?:if|once|when|whenever|after|until|unless|whether|should|provided|assuming|in\s+case|before|make\s+sure|be\s+sure|ensure|"
+    r"please|needs?\s+to|have\s+to|has\s+to|must|important|remember|so\s+that|in\s+order)\b",
+    re.I,
+)
+
+
+def _stated(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
+    """Like _asserted, and a condition or instruction anywhere earlier in the sentence also softens."""
+    for match in pattern.finditer(text):
+        sentence_start = max(text.rfind(mark, 0, match.start()) for mark in ".!?;:") + 1
+        before = text[sentence_start: match.start()]
+        if _negated(before, match.group(0)) or _DOUBTED_RE.search(before) or _SENTENCE_CONDITION_RE.search(before):
+            continue
+        return match
+    return None
 
 
 def claims_verified(text: str) -> bool:
@@ -377,8 +440,14 @@ def check_reply(reply: str, *, session: Session, directive: Directive, data: Cla
             result.fail("confirms a claim detail before verification")
     else:
         status = _asserted(_STATUS_OF_CLAIM_RE, text)
-        if status and status.group(1).lower() not in allowed_low:
-            result.fail(f"states a claim status the facts do not give: {status.group(1)}")
+        if status and (status.group(1) or status.group(2)).lower() not in allowed_low:
+            result.fail(f"states a claim status the facts do not give: {status.group(1) or status.group(2)}")
+        outcome = _stated(_OUTCOME_RE, text)
+        if outcome and (outcome.group(1) or outcome.group(2)).lower().replace("re-", "re") not in allowed_low:
+            result.fail(f"states an outcome the facts do not give: '{outcome.group(0)}'")
+        filed = _stated(_FILED_RE, text)
+        if filed and not directive.facts.get("handoff"):
+            result.fail(f"claims an action the assistant cannot take: '{filed.group(0)}'")
 
     sent = _asserted(_SENT_RE, text)
     if sent:
@@ -392,7 +461,9 @@ def check_reply(reply: str, *, session: Session, directive: Directive, data: Cla
     offer = _asserted(_ACTION_OFFER_RE, text, conditions_soften=False)
     if offer:
         result.fail(f"offers an action the assistant cannot take: '{offer.group(0)}'")
-    done = _asserted(_ACTION_DONE_RE, text)
+    done = _asserted(_ACTION_DONE_RE, text) or _asserted(_ACTION_NOW_RE, text)
+    if not done and not directive.facts.get("handoff"):
+        done = _asserted(_OUTREACH_DONE_RE, text)
     if done:
         result.fail(f"claims an action the assistant cannot take: '{done.group(0)}'")
     promise = _asserted(_PROMISE_RE, text, conditions_soften=False)
