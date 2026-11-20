@@ -456,3 +456,21 @@ def test_repeating_the_question_or_not_knowing_is_not_an_answer(convo: Convo, an
     assert_no_leak(reply)
     convo.say("Me? Yes.")
     assert convo.s.verified
+
+
+def test_a_name_on_record_with_three_parts_is_the_policyholders_own_in_every_usual_form():
+    names = ["Ya Wen Li", "Yaven Li"]
+    for answer in ("Ya Wen Li", "I'm Ya Wen Li", "Yes, this is Ya Wen Li", "Ya Wen", "yes, Li Ya Wen", "Ya-Wen Li", "Yaven Li", "Yes, I'm Ya Wen Li, why?"):
+        assert role_answer(answer, names) == "self", answer
+    for answer in ("It's David Li", "I'm her husband, Tom Li"):
+        assert role_answer(answer, names) == "other", answer
+    for answer in ("Li", "Mrs Li", "Ya Wen Li's", "Ya Wen Li Jr"):
+        assert role_answer(answer, names) != "self", answer
+
+
+def test_the_policyholder_with_a_three_part_name_gets_through(agent: Agent):
+    convo = Convo(agent, answers_role=False)
+    convo.say("Ya Wen Li, 1989-12-03, 5317")
+    assert convo.act == "ROLE_CHECK"
+    convo.say("Yes, this is Ya Wen Li")
+    assert convo.s.verified and convo.s.memory.caller_role == "policyholder"

@@ -992,35 +992,37 @@ _CLAIM_WORD_RE = re.compile(
 )
 
 
-def _holders(names: str | list[str] | tuple[str, ...]) -> list[tuple[str, str]]:
-    """(first name, last name) for every name the policyholder goes by, lower-cased."""
-    out: list[tuple[str, str]] = []
+def _holders(names: str | list[str] | tuple[str, ...]) -> list[tuple[str, ...]]:
+    """The words of every name the policyholder goes by, lower-cased: ("margaret", "chen"), ("ya", "wen", "li")."""
+    out: list[tuple[str, ...]] = []
     for name in [names] if isinstance(names, str) else list(names):
-        tokens = name_tokens(name or "")
-        pair = (tokens[0], tokens[-1] if len(tokens) > 1 else "") if tokens else None
-        if pair and pair not in out:
-            out.append(pair)
+        words = tuple(name_tokens(name or ""))
+        if words and words not in out:
+            out.append(words)
     return out
 
 
-def _name_pattern(first: str, last: str) -> str:
-    return rf"{re.escape(first)}(?:\s+{re.escape(last)})?" if last else re.escape(first)
+def _name_pattern(words: tuple[str, ...]) -> str:
+    """The name in full, the given names, first and last name, or the first name alone."""
+    forms = [list(words), list(words[:-1]), [words[0], words[-1]], [words[0]]]
+    options = dict.fromkeys(r"[\s\-]+".join(map(re.escape, form)) for form in forms if form)
+    return "(?:" + "|".join(options) + ")"
 
 
-def _somebody_else(name: str, holders: list[tuple[str, str]]) -> bool:
+def _somebody_else(name: str, holders: list[tuple[str, ...]]) -> bool:
     """A capitalised name that is not one the policyholder goes by."""
     words = [w.lower().rstrip(".") for w in name.split()]
     titled = words[0] in _HONORIFICS
     words = [w for w in words if w not in _HONORIFICS]
-    theirs = {part for pair in holders for part in pair if part}
+    theirs = {word for name_words in holders for word in name_words}
     if not words or words[0] in _NOT_A_NAME or all(w in theirs for w in words) or re.fullmatch(_KINSHIP, words[0]):
         return False  # "I'm Sorry", "Mom here", or the policyholder's own name in any order
-    if words[0] in {first for first, _ in holders}:
+    if words[0] in {name_words[0] for name_words in holders}:
         return False  # "I'm Margaret Chen Jr": not somebody else by name, so it is asked about
     return not (titled and words[0] in theirs)  # "I'm Mrs Chen" cannot be told from the policyholder
 
 
-def _other_name(text: str, holders: list[tuple[str, str]], first_person_only: bool = False) -> str:
+def _other_name(text: str, holders: list[tuple[str, ...]], first_person_only: bool = False) -> str:
     """A name the caller gives as their own that is not the policyholder's: "I'm David Chen", "David speaking"."""
     found = [m.group(1) for m in (_OWN_NAME_RE if first_person_only else _NAME_INTRO_RE).finditer(text)]
     if not first_person_only:
@@ -1043,11 +1045,11 @@ def said_to_be_someone_else(text: str, holder_names: str | list[str] | tuple[str
     return _names_the_holder(text, holders, narrow=True), ""
 
 
-def _names_the_holder(text: str, holders: list[tuple[str, str]], narrow: bool) -> bool:
+def _names_the_holder(text: str, holders: list[tuple[str, ...]], narrow: bool) -> bool:
     """The policyholder is spoken of by name as somebody else: "Margaret's son", "calling for Margaret"."""
     low = text.lower()
-    for first, last in holders:
-        f, name = re.escape(first), _name_pattern(first, last)
+    for words in holders:
+        f, name, last = re.escape(words[0]), _name_pattern(words), words[-1] if len(words) > 1 else ""
         patterns = [
             rf"\b{name}'s\s+(?:[\w\-]+\s+)?{_KINSHIP}\b|\b{_KINSHIP}\s+of\s+{name}\b",
             rf"\bi(?:'m|\s+am)\s+(?:actually\s+|just\s+|only\s+)?{name}'s\s+[a-z]",
@@ -1076,24 +1078,35 @@ def _is_yes(clause: str) -> bool:
     return bool(bare) and bool(_YES_CLAUSE_RE.fullmatch(bare)) and bool(_YES_WORD_RE.search(bare))
 
 
-def _is_self(clause: str, holders: list[tuple[str, str]]) -> bool:
+def _is_self(clause: str, holders: list[tuple[str, ...]]) -> bool:
     """The clause is exactly an outright statement, possibly after a yes."""
     bare = _YES_LEAD_RE.sub("", clause.lower()).strip(" .,!?;")
     if not bare or clause.rstrip().endswith("?"):
         return False  # "The policyholder?" and "Me?" repeat the question, they do not answer it
     if any(re.fullmatch(template, bare) for template in _SELF_TEMPLATES):
         return True
-    intro = r"(?:(?:i'm|i\s+am|this\s+is|it's|it\s+is|my\s+name\s+is|my\s+name's|it's\s+me|it\s+is\s+me|me)\s+)?"
-    return any(re.fullmatch(rf"{intro}{_name_pattern(first, last)}(?:\s+(?:speaking|here))?", bare) for first, last in holders)
+    # the policyholder's own name, with nothing else: "Margaret Chen", "this is Margaret", "Chen, Margaret"
+    # A first name can look like a yes word ("Ya Wen"), so the clause is also tried as it stands.
+    for candidate in dict.fromkeys((bare, clause.lower().strip(" .,!?;"))):
+        named = re.fullmatch(
+            r"(?:(?:i'm|i\s+am|this\s+is|it's|it\s+is|my\s+name\s+is|my\s+name's|it's\s+me|it\s+is\s+me|me)\s+)?([a-z][a-z\s\-.]*?)(?:\s+(?:speaking|here))?",
+            candidate,
+        )
+        said = name_tokens(named.group(1)) if named else []
+        for words in holders:
+            whole_name = len(said) >= 2 and len(set(said)) == len(said) and set(said) <= set(words)
+            if whole_name or said == [words[0]]:
+                return True
+    return False
 
 
-def _claim_talk(clause: str, holders: list[tuple[str, str]]) -> bool:
+def _claim_talk(clause: str, holders: list[tuple[str, ...]]) -> bool:
     """Talk about the claim, possibly after a yes, with no person in it but the caller."""
     bare = _YES_LEAD_RE.sub("", clause).strip()
     low = bare.lower()
     if not bare or not bare.isascii() or _PERSON_RE.search(bare):
         return False
-    if any(re.search(rf"\b{re.escape(first)}\b", low) for first, _ in holders):
+    if any(re.search(rf"\b{re.escape(words[0])}\b", low) for words in holders):
         return False
     if not ("?" in bare or QUESTION_START_RE.match(low) or _CLAIM_WORD_RE.search(low)):
         return False
@@ -1106,7 +1119,7 @@ def holder_names(data: ClaimsData, party_id: str | None, given: str = "") -> lis
     return [name for name in (given, *((party.name, *party.name_aliases) if party else ())) if name]
 
 
-def _clause_kind(clause: str, holders: list[tuple[str, str]]) -> str:
+def _clause_kind(clause: str, holders: list[tuple[str, ...]]) -> str:
     """What one clause of the answer is, or "" when it is none of these.
 
     self      an outright statement: "I'm the policyholder", "that's me", the policyholder's name

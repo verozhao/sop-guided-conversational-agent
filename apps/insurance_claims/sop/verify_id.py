@@ -486,6 +486,12 @@ class VerifyIdPhase(PolicyBase):
                 f"{why} Claim details can only go to the policyholder or to someone the policyholder has approved. "
                 "Could you answer with just yes or no: are you the policyholder yourself?"
             )
+        elif "?" in t.text:
+            # asked why once more: the reason again, in one sentence, and the question
+            text = (
+                "I ask because claim details can only go to the policyholder or to someone the policyholder has approved. "
+                "I still need just a yes or a no before I can go on: are you the policyholder yourself?"
+            )
         else:
             text = "Sorry, I still need just a yes or a no before I can go on: are you the policyholder yourself?"
         return self._directive(
