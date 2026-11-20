@@ -41,9 +41,20 @@ LAST4_RE = re.compile(
 )
 # "my husband's birthday is", "my doctor's number is": the value after it is somebody else's
 _THIRD_PARTY_RE = re.compile(
-    r"\bmy\s+(?:mother|mom|mum|father|dad|wife|husband|son|daughter|partner|spouse|brother|sister|friend|kid|child|"
-    r"doctor|dentist|lawyer|attorney|boss|employer|provider|pharmacy|clinic|hospital)(?:'s)?\s+(?:[\w']+\s+){0,4}$",
+    r"\b(?:my|the|our|their|his|her|a)\s+(?:mother|mom|mum|father|dad|wife|husband|son|daughter|partner|spouse|brother|sister|friend|kid|"
+    r"child|doctor|dentist|physician|surgeon|specialist|therapist|lawyer|attorney|boss|employer|provider|pharmacy|pharmacist|clinic|"
+    r"hospital|lab|adjuster|agent|broker|insurer|billing\s+(?:office|department)|claims\s+(?:office|department|team))(?:'s|s')?\s+"
+    r"(?:[\w']+\s+){0,4}$|\bfax(?:\s+number)?\s+(?:is\s+|:\s*)?$",
     re.I,
+)
+# "I sent the forms to claims@insurer.com": an address something was sent to is not the caller's own
+_SENT_TO_RE = re.compile(
+    r"\b(?:sent|send|sending|forward|forwarded|mailed|e-?mailed|wrote|written|faxed|submitted|uploaded|copied|cc'?d)\b[^.!?]{0,60}\bto\s*$", re.I
+)
+# Shared mailboxes are never a policyholder's own address.
+_ROLE_MAILBOXES = set(
+    """claims claim billing office info support help admin contact service customerservice noreply no-reply donotreply
+    appeals records reception frontdesk hello team enquiries inquiries accounts payments""".split()
 )
 # "call me back at ..." gives a number to ring, which need not be the one on the policy. "reach me at ..." is a detail.
 _CALLBACK_RE = re.compile(r"\b(?:call|text|ring|phone)\s+(?:me\s+)?back\s+(?:at|on)\s*$|\bcall-?\s?back\s+number\s+(?:is\s+)?$", re.I)
@@ -155,17 +166,24 @@ REP_WEAK_DETAIL_RE = re.compile(
 )
 # Once the gate has opened, only an explicit statement about oneself counts.
 SELF_REP_RE = re.compile(
-    rf"\bi(?:'m|\s+am)\s+(?:actually\s+|really\s+)?(?:her|his|their)\s+{_ROLES}\b|\bi(?:'m|\s+am)\s+not\s+the\s+policy\s?holder\b|"
+    rf"\bi(?:'m|\s+am)\s+(?:actually\s+|really\s+)?(?:her|his|their)\s+(?:[\w\-]+\s+)?{_ROLES}\b|\bi(?:'m|\s+am)\s+not\s+the\s+policy\s?holder\b|"
     r"\bcalling\s+on\s+(?:her|his|their)\s+behalf\b|"
     rf"\bi(?:'m|\s+am)\s+(?:actually\s+|really\s+|only\s+|just\s+)?calling\s+(?:for|on\s+behalf\s+of)\s+(?:her|him|them|my\s+(?:{_RELATIVES}))\b|"
-    rf"\bthis\s+is\s+(?:actually\s+)?(?:her|his|their)\s+{_ROLES}\b|\bnot\s+my\s+(?:own\s+)?(?:policy|claim)\b",
+    rf"\bthis\s+is\s+(?:actually\s+)?(?:her|his|their)\s+{_ROLES}\b|\bnot\s+my\s+(?:own\s+)?(?:policy|claim)\b|"
+    # "my mom is the policyholder, I'm just helping", "it's her policy", "I have power of attorney"
+    rf"\bmy\s+(?:{_RELATIVES})\s+is\s+the\s+(?:policy\s?holder|insured|account\s+holder|member|owner)\b|"
+    r"\b(?:she|he)(?:'s|\s+is)\s+the\s+(?:policy\s?holder|insured|account\s+holder|owner)\b|"
+    rf"\bi(?:'m|\s+am)\s+(?:just\s+|only\s+)?helping\s+(?:her|him|them|my\s+(?:{_RELATIVES}))\b|"
+    rf"\b(?:it's|it\s+is|this\s+is)\s+(?:actually\s+)?(?:her|his|their|my\s+(?:{_RELATIVES})'s)\s+(?:policy|account)\b|"
+    rf"\bi(?:'m|\s+am)\s+(?:the\s+)?(?:policy\s?holder|account\s+holder|insured)'s\s+{_ROLES}\b|"
+    r"\bi\s+(?:have|hold)\s+(?:\w+\s+){0,2}?(?:power\s+of\s+attorney|poa)\b",
     _I,
 )
 # Answers to "are you the policyholder yourself?". A no is looked for first, and a yes
 # only counts when nothing in the message negates it: "No, I am not" must never read as "I am".
 ITS_ME_RE = re.compile(
     r"\b(?:that's|it's|this\s+is|that\s+is|it\s+is)\s+me\b|\bmyself\b|\bmy\s+own\b|^\W*(?:yes[\s,]*)?i\s+am\W*$|"
-    r"\bi(?:'m|\s+am)\s+the\s+(?:policy\s?holder|insured|account\s+holder|one)\b|^\W*speaking\W*$|"
+    r"\bi(?:'m|\s+am)\s+the\s+(?:policy\s?holder|insured|account\s+holder|one)\b(?!'s)|^\W*speaking\W*$|"
     r"\b(?:it's|it\s+is|that's|policy\s+is|policy's|account\s+is)\s+mine\b|\b(?:in|under)\s+my\s+(?:own\s+)?name\b|\bmy\s+policy\b",
     _I,
 )
@@ -769,6 +787,74 @@ def states_third_party(text: str) -> bool:
     return any((m := pattern.search(text)) and _name_tail(m.group(1)) for pattern in (_CALLING_FOR, _CALLING_ABOUT, _ROLE_FOR, _IS_MY))
 
 
+_KINSHIP = (
+    rf"(?:{_RELATIVES}|parent|child|kid|niece|nephew|cousin|grandson|granddaughter|stepson|stepdaughter|fianc[e\u00e9]e?|"
+    r"boyfriend|girlfriend|relative|guardian|caregiver|carer|poa|proxy|executor|trustee)"
+)
+# In answer to the role question: the policy is somebody else's, or the caller acts for them.
+STATES_OTHER_RE = re.compile(
+    rf"\b(?:her|his|their)\s+(?:(?:legal|court-appointed|appointed|authori[sz]ed|primary|only|eldest|oldest|youngest|adult)\s+){{0,2}}"
+    rf"{_KINSHIP}\b(?!'s)|"                                                                # "her son", "her legal guardian"
+    rf"\b(?:policy\s?holder|account\s+holder|insured|member|owner)'s\s+{_KINSHIP}\b|"      # "the account holder's son"
+    rf"\b{_KINSHIP}\s+of\s+(?:the\s+)?(?:policy\s?holder|account\s+holder|insured|owner|member)\b|"
+    rf"\bfor\s+(?:my|our)\s+(?:[\w\-]+\s+)?{_KINSHIP}\b(?!'s)|\bfor\s+(?:her|him|them|someone|somebody)\b|"
+    r"\bon\s+(?:her|his|their)\s+behalf\b|\bon\s+behalf\s+of\b(?!\s+(?:myself|me)\b)|"
+    rf"\bmy\s+{_KINSHIP}\s+is\s+the\s+(?:policy\s?holder|insured|account\s+holder|member|owner|one)\b|"
+    rf"\b(?:it's|it\s+is|that's|this\s+is)\s+my\s+{_KINSHIP}'s\b|\bmy\s+{_KINSHIP}'s\s+(?:policy|account|name|plan)\b|"
+    r"\b(?:power\s+of\s+attorney|poa)\b|"
+    r"\b(?:handle|handles|manage|manages|look\s+after|looks\s+after|take\s+care\s+of|takes\s+care\s+of)\s+(?:her|his|their)\b|"
+    r"\b(?:helping|help)\s+(?:her|him|them)\b|\bi(?:'m|\s+am)\s+(?:just|only)\s+helping\b",
+    _I,
+)
+# Any sign of another person. An answer that has one is never a plain yes.
+_THIRD_SIGNAL_RE = re.compile(
+    rf"\b(?:she|he|her|hers|him|his|their|theirs|them|someone|somebody|{_KINSHIP}|lawyer|attorney)\b|'s\s+(?:policy|account|claim|name|plan)\b", _I
+)
+# "This is she." means "that's me". "It's her policy" and "this is her husband" do not.
+_THIS_IS_SHE_RE = re.compile(r"\bthis\s+is\s+(?:she|he|her|him)\b(?=\s*(?:[.,!?]|$))", _I)
+_INTRO_RE = re.compile(r"\b(?:i'm|i\s+am|im|this\s+is|my\s+name\s+is|name's)\s+([A-Za-z][A-Za-z'\-]*)(?:\s+([A-Za-z][A-Za-z'\-]*))?", _I)
+
+
+def role_answer(text: str, holder_name: str) -> str:
+    """How the caller answered "are you the policyholder yourself?", read from their own words.
+
+    other: they say the policy is somebody else's, or that they act for someone.
+    self:  a yes with nothing in it that points at another person.
+    third: another person comes up, but nothing is said outright.
+    none:  no answer in it.
+    Only "self" may open the gate. The policy applies this whichever engine read the message.
+    """
+    holder = holder_name.lower().strip()
+    cleaned = _THIS_IS_SHE_RE.sub(" that is me ", text)
+    low = cleaned.lower().strip()
+    first, _, rest = holder.partition(" ")
+    holders_relative = bool(holder) and bool(re.search(rf"\b{re.escape(first)}(?:\s+[\w\-]+)?'s\s+{_KINSHIP}\b", low))
+    if NOT_ME_RE.search(cleaned) or STATES_OTHER_RE.search(cleaned) or holders_relative or states_third_party(cleaned):
+        return "other"
+    polarity = _polarity(low)
+    if polarity == "no":
+        return "other"
+    holder_words = set(holder.split())
+    unknown_name = False
+    for match in _INTRO_RE.finditer(cleaned):
+        word, second = match.group(1), match.group(2) or ""
+        if word.lower() in holder_words or word.lower() in _COMMON or _CONTRACTION.search(word):
+            continue
+        if word[0].isupper() and second[:1].isupper() and second.lower() not in _COMMON:
+            return "other"  # "I'm David Chen": a full name that is not the policyholder's
+        unknown_name = True  # "I'm David", "i'm positive": cannot tell, so it is asked again
+    if unknown_name or _THIRD_SIGNAL_RE.search(cleaned):
+        return "third"
+    names_self = bool(holder) and (
+        low.strip(" .,!") == holder
+        or bool(re.search(
+            rf"\b(?:i'm|i\s+am|this\s+is|it's|it\s+is|my\s+name\s+is)\s+{re.escape(first)}(?:\s+{re.escape(rest)})?(?![\w']|\s+\w+'s)", low
+        ))
+    )
+    says_yes = polarity == "yes" or bool(ITS_ME_RE.search(cleaned)) or names_self
+    return "self" if says_yes and not NEGATION_RE.search(low) else "none"
+
+
 # --------------------------------------------------------------------------- the reading
 
 
@@ -824,22 +910,13 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
             u.guessed.append("caller_role")  # inferred from how they talk, never said outright
     if not session.verified and u.caller_role == "unknown":
         if pending == "role_check":  # the agent has just asked "are you the policyholder yourself?"
-            polarity = _polarity(low)
-            holder = (memory.identity.get("full_name") or "").lower()
-            first, _, rest = holder.partition(" ")
-            # "I'm Jane", "Jane Doe": the policyholder's own name is a yes. "It's Jane Doe's policy" is not.
-            names_self = bool(holder) and (
-                low.strip(" .,!") == holder
-                or bool(re.search(
-                    rf"\b(?:i'm|i\s+am|this\s+is|it's|it\s+is|my\s+name\s+is)\s+{re.escape(first)}(?:\s+{re.escape(rest)})?(?![\w']|\s+\w+'s)", low
-                ))
-            )
-            says_no = polarity == "no" or bool(NOT_ME_RE.search(text))
-            says_yes = polarity == "yes" or bool(ITS_ME_RE.search(text)) or names_self
-            if says_no and not says_yes:
+            answer = role_answer(text, memory.identity.get("full_name") or "")
+            if answer == "other":
                 u.caller_role = "representative"
-            elif says_yes and not says_no and not NEGATION_RE.search(low):
+            elif answer == "self":
                 u.caller_role = "policyholder"
+            elif answer == "third":
+                u.mentions_other = True
         elif MENTIONS_OTHER_RE.search(text):
             u.mentions_other = True
     is_rep = u.caller_role == "representative" or (u.caller_role == "unknown" and memory.caller_role == "representative")
@@ -852,7 +929,14 @@ def rule_understand(session: Session, text: str, data: ClaimsData, today: date) 
 
     match = EMAIL_RE.search(work)
     if match:
-        raw["email"] = match.group(0)
+        before = work[max(0, match.start() - 60): match.start()]
+        someone_elses = (
+            (bool(_THIRD_PARTY_RE.search(before)) and not is_rep)  # "my doctor's office email is ..."
+            or bool(_SENT_TO_RE.search(before))
+            or match.group(0).split("@")[0].lower() in _ROLE_MAILBOXES
+        )
+        if not someone_elses:
+            raw["email"] = match.group(0)
         work = _mask(work, match.span())
     match = CLAIM_ID_RE.search(work)
     if match:

@@ -50,9 +50,11 @@ def test_handoff_says_details_were_passed_along_when_they_were(convo: Convo):
 def test_representative_is_told_about_consent_up_front_and_not_which_details_matched(convo: Convo):
     reply = convo.say(REP_OPENING)
     directive = convo.trace["directive"]
-    assert "noted the policyholder's full name" in reply and "confirmed" not in reply
-    assert "details_received_so_far" in directive["facts"]["verification"]
+    # nothing is named as noted or confirmed, and the choice is still the whole list
+    assert "noted" not in reply and "confirmed" not in reply and "full name" in reply
+    assert "details_received_so_far" not in directive["facts"]["verification"]
     assert "details_confirmed_so_far" not in directive["facts"]["verification"]
+    assert len(directive["facts"]["verification"]["caller_can_choose_from"]) == 5
     assert any("will also be asked to approve" in point for point in directive["must_cover"])
     assert any("Do not say whether the details given so far match" in rule for rule in directive["must_not"])
 

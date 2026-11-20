@@ -18,7 +18,7 @@ from typing import Any
 
 from sop_harness.core import Directive
 
-from ..nlu_rules import states_third_party
+from ..nlu_rules import role_answer
 from ..normalize import join_items
 from ..state import RESOLVE_INTENT, Session
 from ..understanding import Understanding
@@ -106,12 +106,19 @@ class VerifyIdPhase(PolicyBase):
         holder_name = (m.identity.get("full_name") or "").lower()
         own_name = bool(m.representative_name) and m.representative_name.lower() != holder_name
         if s.pending == "role_check":
-            # The answer to "are you the policyholder yourself?". A no always wins, even against
-            # a reading that also says "policyholder", and so does a name of their own.
-            if u.affirmation == "no" or states_third_party(t.text) or own_name:
+            # The answer to "are you the policyholder yourself?". The caller's own words decide,
+            # whichever engine read them. Only a yes that points at nobody else opens the gate:
+            # "yes, I'm her son" and "yes, for my mother" are not that yes.
+            answer = role_answer(t.text, m.identity.get("full_name") or "")
+            says_other = answer == "other" or u.affirmation == "no" or own_name or (u.caller_role == "representative" and answer != "self")
+            says_self = answer == "self" or (answer == "none" and (u.affirmation == "yes" or u.caller_role == "policyholder"))
+            if says_other:
                 m.caller_role, m.role_guessed, m.role_unclear = "representative", False, False
-            elif u.affirmation == "yes" and (m.caller_role == "unknown" or m.role_guessed):
+            elif says_self:
                 m.caller_role, m.role_guessed, m.role_unclear = "policyholder", False, False
+            else:
+                # Another person came up in the answer, or nothing clear was said: ask once more.
+                m.caller_role, m.role_guessed, m.role_unclear = "unknown", False, True
         is_rep = self._is_rep(s)
 
         if result.verified:
@@ -129,6 +136,10 @@ class VerifyIdPhase(PolicyBase):
         needed = REQUIRED_MATCHES - len(matched)
         remaining = [f for f in PII_FIELDS if f not in matched and f not in m.declined]
         alternatives = [f for f in remaining if f not in result.conflicts and f not in result.incomplete]
+        # A third party is never shown which of the details they gave were right. For them the
+        # choice is always the whole list, and nothing is named as noted or confirmed.
+        offer = [f for f in PII_FIELDS if f not in m.declined] if is_rep else remaining
+        shown = [] if is_rep else matched
         new_pii = [f for f in t.new_identity if f in PII_FIELDS]
         who = "the policyholder's identity" if is_rep else "your identity"
         facts: dict[str, Any] = {
@@ -136,7 +147,7 @@ class VerifyIdPhase(PolicyBase):
                 "rule": "At least three of five details must match: full name, date of birth, phone number, email address, last four digits of the SSN or national ID.",
                 "details_confirmed_so_far": [SHORT_LABELS[f] for f in matched],
                 "more_details_needed": needed,
-                "caller_can_choose_from": [SHORT_LABELS[f] for f in remaining],
+                "caller_can_choose_from": [SHORT_LABELS[f] for f in offer],
                 "caller_declined_to_give": [SHORT_LABELS[f] for f in m.declined],
             },
             "process": PROCESS_FACTS,
@@ -164,7 +175,7 @@ class VerifyIdPhase(PolicyBase):
         rep_rules: list[str] = []
         if is_rep:
             # A third party is not told which of the details they supplied were right.
-            facts["verification"]["details_received_so_far"] = facts["verification"].pop("details_confirmed_so_far")
+            facts["verification"].pop("details_confirmed_so_far")
             rep_rules = [
                 "The details asked for are the policyholder's. Do not say whether the details given so far match the records. Say only how many more are needed."
             ]
@@ -296,9 +307,9 @@ class VerifyIdPhase(PolicyBase):
                     s, t, "caller declined identity verification",
                     lead="I understand, and I won't keep pressing you.",
                 )
-            ask = self._ask_identity(s, matched, remaining)
+            ask = self._ask_identity(s, matched, offer)
             if s.refusal_count == 1:
-                credit = f"You're right that you've given me {self._labels(s, matched)}, thank you. " if matched else ""
+                credit = f"You're right that you've given me {self._labels(s, shown)}, thank you. " if shown else ""
                 if not t.empathy:
                     credit = "I understand, and it's sensible to be careful with personal details. " + credit
                 text = (
@@ -316,7 +327,7 @@ class VerifyIdPhase(PolicyBase):
                 text = (
                     f"I do want to get you an answer today. I'm not able to skip this step, because it's what "
                     f"stops anyone else from getting into your claim. You can use whichever details you're most "
-                    f"comfortable with: {self._labels(s, remaining, 'or')}. Or, if you'd rather, I can connect "
+                    f"comfortable with: {self._labels(s, offer, 'or')}. Or, if you'd rather, I can connect "
                     f"you with a human representative. Which would you prefer?"
                 )
                 cover = [
@@ -343,7 +354,7 @@ class VerifyIdPhase(PolicyBase):
 
         # 4. A question about the process itself.
         if u.process_question and not new_pii:
-            ask = self._ask_identity(s, matched, remaining)
+            ask = self._ask_identity(s, matched, offer)
             return self._directive(
                 s, t, "VERIFY_EXPLAIN",
                 goal="Answer the caller's question about the process from facts.process (and facts.representative if relevant), then continue with verification.",
@@ -361,8 +372,8 @@ class VerifyIdPhase(PolicyBase):
                 opener += " I can help with that as soon as we've finished verifying."
             if u.declined_fields:
                 opener = f"That's fine, you don't need to give me {self._labels(s, u.declined_fields, 'or')}."
-            if matched:
-                opener += f" I've {'noted' if is_rep else 'confirmed'} {self._labels(s, matched)}."
+            if shown:
+                opener += f" I've confirmed {self._labels(s, shown)}."
             if result.incomplete:
                 opener += " For the name to count I'll need the full first and last name."
             for kind in u.partial:
@@ -387,7 +398,7 @@ class VerifyIdPhase(PolicyBase):
             return self._directive(
                 s, t, "VERIFY_PROGRESS",
                 goal="Verification is under way but not complete. Acknowledge progress and ask for the remaining details.",
-                fallback=f"{opener}{rep_note} {self._ask_identity(s, matched, remaining)}",
+                fallback=f"{opener}{rep_note} {self._ask_identity(s, matched, offer)}",
                 facts=facts,
                 cover=cover,
                 must_not=rep_rules,
@@ -405,7 +416,7 @@ class VerifyIdPhase(PolicyBase):
             )
 
         # 7. Nothing usable yet: ask (again), acknowledging any request we saved.
-        ask = self._ask_identity(s, matched, remaining)
+        ask = self._ask_identity(s, matched, offer)
         if u.has_request:
             text = f"I'd be glad to help with that. Before I can look at any claim, I need to verify {who}.{rep_note} {ask}"
             cover = [

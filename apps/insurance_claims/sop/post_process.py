@@ -26,8 +26,12 @@ from .common import (
 EMAIL_IN_TEXT = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 SUMMARY_AGAIN = re.compile(r"\bre-?send\b|\bsend\s+(?:it|that|the\s+summary)\b|\bsummary\b|\brecap\b|\be-?mail\b", re.I)
 OTHER_ADDRESS = re.compile(
-    r"\b(?:different|another|other|new|work|personal)\s+(?:e-?mail|address|one)\b|"
-    r"\bnot\s+(?:to\s+)?that\s+(?:address|e-?mail|one)\b|\bsomewhere\s+else\b",
+    r"\b(?:different|another|other|new|work|personal|second|alternate|alternative)\s+(?:e-?mail|address|one|account|inbox)\b|"
+    r"\bnot\s+(?:to\s+)?that\s+(?:address|e-?mail|one)\b|\bsomewhere\s+else\b|"
+    # "send it to my son", "to him instead", "cc my lawyer": another recipient
+    r"(?:\b(?:send|e-?mail|mail|forward|deliver|get)\b[^.!?]{0,40}|^\W*)\bto\s+(?:my|our)\s+"
+    r"(?!(?:e-?mail|address|inbox|account|own|usual|regular|normal|primary|main|file)\b)[a-z][\w\-]*|"
+    r"\bto\s+(?:him|her|them|someone\s+else)\b|\b(?:cc|copy)\s+(?:my|him|her|them)\b",
     re.I,
 )
 
@@ -137,12 +141,7 @@ class PostProcessPhase(PolicyBase):
         choice = u.email_summary_choice
         if choice == "none" and s.pending == "email_offer" and u.affirmation != "none" and not u.process_question:
             choice = "send" if u.affirmation == "yes" else "skip"
-        party = self.data.party(s.party_id)
-        typed = EMAIL_IN_TEXT.search(t.text)
-        other_address = u.identity.get("email", "") or (typed.group(0).lower() if typed else "")
-        on_file = {party.email.lower(), *(a.lower() for a in party.email_aliases)} if party else set()
-        elsewhere = bool(other_address and other_address.lower() not in on_file) or bool(OTHER_ADDRESS.search(t.text))
-        if elsewhere and choice != "skip":
+        if self._elsewhere(s, u, t) and choice != "skip":
             s.pending = "email_offer"
             return self._directive(
                 s, t, "EMAIL_ADDRESS_FIXED",
@@ -209,10 +208,38 @@ class PostProcessPhase(PolicyBase):
             must_not=["Do not send or claim to have sent anything yet."],
         )
 
+    def _elsewhere(self, s: Session, u: Understanding, t: TurnCtx) -> bool:
+        """The caller wants the summary to go somewhere other than the address on file."""
+        party = self.data.party(s.party_id)
+        typed = EMAIL_IN_TEXT.search(t.text)
+        other = u.identity.get("email", "") or (typed.group(0).lower() if typed else "")
+        on_file = {party.email.lower(), *(a.lower() for a in party.email_aliases)} if party else set()
+        return bool(other and other.lower() not in on_file) or bool(OTHER_ADDRESS.search(t.text))
+
     def _closed(self, s: Session, u: Understanding, t: TurnCtx) -> Directive | None:
         target = email_target(s, self.data)
+        if u.email_summary_choice == "send" and not s.outbox and self._elsewhere(s, u, t):
+            # Asked for after the goodbye, and for another recipient: nothing goes out on that.
+            s.pending = "email_offer"
+            return self._directive(
+                s, t, "EMAIL_ADDRESS_FIXED",
+                goal="The caller wants the summary sent somewhere other than the address on file. That is not allowed. Explain, and ask whether to send it to the address on file or leave it.",
+                fallback=(
+                    f"I can only send the summary to the email address on file, which is {target}. Changing "
+                    f"the address on file needs a human representative. Would you like me to send it to "
+                    f"{target}, or shall we leave it?"
+                ),
+                facts={"email_summary": {"sent": False, "can_only_go_to": target}},
+                cover=[
+                    "Say the summary can only go to the email address on file, and give the masked address.",
+                    "Say that changing the address needs a human representative.",
+                    "Ask whether to send it to the address on file or leave it.",
+                ],
+                must_not=["Do not send or claim to have sent anything yet.", "Do not repeat the address or the person the caller named."],
+            )
         if u.email_summary_choice == "send" and not s.outbox:
             s.email["decision"] = "send"
+            s.pending = "none"
             out = self.tools.call("send_email_summary", s, t.trace)
             return self._directive(
                 s, t, "EMAIL_SENT",
