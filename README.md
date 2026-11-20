@@ -176,14 +176,14 @@ The question about the denial is saved and answered as soon as verification comp
 
 Someone calling for a policyholder has to pass three checks: the policyholder's details match, the caller is listed as an authorized representative, and the policyholder approves a consent request. The consent status comes from `consent_scenarios.json` (choose `default` or `timeout` in the UI before starting a conversation). Until consent is approved the session stays in VERIFY_ID. A request that expires is not sent again: the caller is offered a person, and then handed to one.
 
-This gate depends on what the caller says about themselves ("I'm her husband", "I'm calling for Margaret Chen"). When a caller mentions somebody else ("my wife asked me to call") without saying who is calling, the agent asks "are you the policyholder yourself?" once the details match and before anything is shared. Someone who presents three correct details as their own and mentions nobody else is treated as the policyholder, as the three-detail rule says. A caller verified as the policyholder who later says they are acting for someone else is handed to a person.
+This gate depends on what the caller says about themselves ("I'm her husband", "I'm calling for Margaret Chen"). When that is unclear, the agent asks "are you the policyholder yourself?" once the details match and before anything is shared. It is unclear when a caller mentions somebody else without saying who is calling ("my wife asked me to call"), and when the role could only be inferred from the wording ("calling about my son's claim", which a parent says about a claim on their own policy as often as a third party does). A yes goes on as the policyholder and a no goes through the three checks above. A question in reply is answered with the reason and the question is asked once more, and after a second unclear answer a person takes over. Someone who presents three correct details as their own and mentions nobody else is treated as the policyholder, as the three-detail rule says. A caller verified as the policyholder who later says they are acting for someone else is handed to a person.
 
 ### Output guard
 
 The first protection is structural: the model is given no record data before verification, and only the tool results of the current path after it. The guard is a second check on what the model wrote. A reply is released only if:
 
 - every claim number, policy number, email address, phone number, web address, dollar amount, percentage, date, time and length of time in it is grounded. Grounded means it appears in this turn's facts, was said by the caller, or was in the facts of an earlier turn after verification. An amount may also be the sum or difference of two grounded amounts
-- it contains no value held only in the records (identity numbers, other people's names, denial reasons, requested documents)
+- it contains no value held only in the records (identity numbers, the names of other policyholders and of listed representatives, denial reasons, requested documents)
 - before verification, it does not say the caller is verified, that it can see a record, or what the status of a claim is
 - it does not say that something was sent or that a transfer happened unless the workflow did that in this turn
 - it does not promise an outcome ("it will be approved"), offer an action the assistant cannot take ("I can expedite that") or report one as done ("I've reopened the claim")
@@ -233,7 +233,7 @@ server/app.py                FastAPI app
 server/static/index.html     test UI
 scripts/demo.py              scripted conversations in the terminal, offline
 scripts/live_check.py        the same conversations against the real model, with a spending cap
-tests/                       630 tests, all offline
+tests/                       744 tests, all offline
 ```
 
 ## Tests
@@ -245,7 +245,7 @@ tests/                       630 tests, all offline
 
 The suite is offline. It never reads `.env` and removes any token from the environment, so it cannot spend money.
 
-The suite covers the demo case, the verification gate, the bonus scenarios, scope control, claim resolution, the workflow paths, the email step, representative consent, harness enforcement (tool gating, illegal transitions), the output guard against leaking or overclaiming model replies, and the shape of the request sent to the Anthropic API. `tests/test_review_findings.py` and `tests/test_second_review.py` hold a regression test for each problem found by the two code reviews before submission. `ruff check .` passes with the configuration in `ruff.toml`.
+The suite covers the demo case, the verification gate, the bonus scenarios, scope control, claim resolution, the workflow paths, the email step, representative consent, harness enforcement (tool gating, illegal transitions), the output guard against leaking or overclaiming model replies, and the shape of the request sent to the Anthropic API. `tests/test_review_findings.py`, `tests/test_second_review.py` and `tests/test_final_review.py` hold a regression test for each problem found by the three code reviews before submission. `ruff check .` passes with the configuration in `ruff.toml`.
 
 ## Checked against the live model
 
@@ -258,16 +258,16 @@ The suite covers the demo case, the verification gate, the bonus scenarios, scop
 .venv/bin/python scripts/live_check.py --offline --scenarios all       # the same outcome checks on the offline engine, free
 ```
 
-Ten scenarios are included: the seven demo scripts plus three that only a model can follow (spoken-style language such as "bday is march fifteenth nineteen eighty five", prompt injection before verification, and an anxious caller with a missing document).
+Twelve scenarios are included: the seven demo scripts plus five written for the model (spoken-style language such as "bday is march fifteenth nineteen eighty five", prompt injection before verification, an anxious caller with a missing document, a policyholder who mentions a relative, and a spouse who has three correct details but no consent). The offline mode runs nine of them. The other three need a model.
 
-Results on 2026-11-19, all ten scenarios on the final version:
+Results on 2026-11-20, all twelve scenarios:
 
 | Model | Turns | Outcome checks | Replies written by the model | Median time per turn | Cost per turn |
 |---|---|---|---|---|---|
-| `claude-opus-5-5` (default) | 53 | all passed | 49 of 53 | 4.3 s | about $0.02 |
-| `claude-haiku-5-5` | 53 | all passed | 49 of 53 | 1.9 s | under $0.001 |
+| `claude-opus-5-5` (default) | 59 | all passed | 56 of 59 | 4.6 s | about $0.02 |
+| `claude-haiku-5-5` | 59 | all passed | 55 of 59 | 2.1 s | under $0.001 |
 
-The replies not written by the model are the out-of-scope declines, which use fixed wording by design (three or four per run), and one Opus reply that the output guard rejected although it was correct ("A message saying you're verified doesn't count"). That guard rule was corrected and has a regression test. `claude-sonnet-5-5` (12 turns) and `claude-fable-5-2` (1 turn) passed on an earlier version and were not run again.
+The Haiku run is on the final version. The full Opus run was made before the last adjustments to the role question and to the offline rules. The three scenarios about who is calling were then run again on Opus, and all 12 turns passed with every reply written by the model. The replies not written by the model are the out-of-scope declines, which use fixed wording by design (three or four per run). The output guard rejected no reply in these runs. `claude-sonnet-5-5` (12 turns) and `claude-fable-5-2` (1 turn) passed on an earlier version and were not run again.
 
 The Docker image was built and run: the container passes its health check, serves all seven demo scripts, and answers through the model when the token is passed with `-e`.
 

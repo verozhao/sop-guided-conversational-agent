@@ -7,6 +7,7 @@ whichever engine produced the reading.
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from typing import Any
@@ -203,6 +204,22 @@ UNDERSTANDING_SCHEMA: dict[str, Any] = {
     ],
 }
 
+
+# Somebody else comes up in the message, but it does not say who is calling. The policy
+# then asks "are you the policyholder yourself?" before the gate opens. Applied to the
+# caller's own words, so it holds whichever engine read the message.
+MENTIONS_OTHER_RE = re.compile(
+    r"\b(?:mother|mom|mum|father|dad|wife|husband|son|daughter|spouse|brother|sister|grandmother|grandfather|"
+    r"grandma|grandpa|aunt|uncle)\b|\b(?:my|our|a|the)\s+(?:partner|client|friend|neighbou?r|patient)\b|"  # not "I've been patient"
+    r"\b(?:she|he)\s+(?:asked|wants|wanted|needs|can't|cannot|is\s+the|told\s+me)\b|"
+    r"\bfor\s+(?:her|him|them)\b|\basked\s+me\s+to\s+call\b",
+    re.I,
+)
+# "my date of birth is ...": the caller is giving their own details.
+OWN_DETAILS_RE = re.compile(
+    r"\bmy\s+(?:own\s+)?(?:date\s+of\s+birth|dob|birthday|ssn|social(?:\s+security)?|phone(?:\s+number)?|e-?mail(?:\s+address)?)\b",
+    re.I,
+)
 
 # Words that describe a relationship or role. A "name" containing one is not a name.
 ROLE_WORDS = {

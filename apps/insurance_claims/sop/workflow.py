@@ -29,6 +29,7 @@ from typing import Callable
 from sop_harness.core import Directive, PhaseGraph, ToolRegistry, TurnTrace
 
 from ..data import ClaimsData
+from ..nlu_rules import states_third_party
 from ..state import (
     CLOSED,
     ESCALATED,
@@ -38,7 +39,7 @@ from ..state import (
     VERIFY_ID,
     Session,
 )
-from ..understanding import Understanding
+from ..understanding import MENTIONS_OTHER_RE, OWN_DETAILS_RE, Understanding
 from .common import (
     DISTRESS_OFFER_AT,
     EMPATHY,
@@ -162,6 +163,28 @@ class InsuranceSOP(VerifyIdPhase, ResolveIntentPhase, ProcessCasePhase, PostProc
 
         if not s.verified:
             already_matched = set(s.verification.get("matched", []))
+            holder = (m.identity.get("full_name") or "").lower()
+            if u.source == "llm" and u.caller_role == "representative" and not states_third_party(t.text):
+                # The model concluded this from the wording ("my husband told me to call"). The
+                # caller did not say it, so it is settled with the role question, not assumed.
+                u.guessed.append("caller_role")
+            if u.caller_role == "representative" and m.caller_role == "representative" and "caller_role" not in u.guessed:
+                m.role_guessed = False  # now they have said it outright
+            # Has the caller acted as a representative: given a name of their own that is not
+            # the policyholder's, or been told they are not listed?
+            acted_as_rep = bool(
+                (m.representative_name and holder and m.representative_name.lower() != holder) or s.rep_denials or s.rep_name_refused
+            )
+            if m.caller_role == "representative" and m.role_guessed and not acted_as_rep and u.caller_role != "representative":
+                if OWN_DETAILS_RE.search(t.text) or u.caller_role == "policyholder":
+                    # The role was read from a turn of phrase, and now they give details as their
+                    # own ("my date of birth is ...") or say they are the policyholder. The role is
+                    # open again, and the name they gave as their own is checked like any other.
+                    m.caller_role, m.role_guessed, m.role_unclear = "unknown", False, True
+                    own = u.representative_name or m.representative_name
+                    if own and "full_name" not in u.identity and not holder:
+                        u.identity["full_name"] = own
+                    u.representative_name, m.representative_name = "", ""
             for name, value in u.identity.items():
                 stored = m.identity.get(name, "")
                 if name == "full_name" and " " not in value and stored and " " not in stored and stored.lower() != value.lower():
@@ -188,13 +211,14 @@ class InsuranceSOP(VerifyIdPhase, ResolveIntentPhase, ProcessCasePhase, PostProc
                     captured.append(f"declined.{name}")
                 if name in m.identity and name not in u.identity and name not in already_matched:
                     del m.identity[name]  # the caller withdrew a value given earlier
-            if u.mentions_other and m.caller_role == "unknown":
+            # The cue is taken from the caller's own words, so the model path gets it too.
+            if (u.mentions_other or (u.caller_role == "unknown" and MENTIONS_OTHER_RE.search(t.text))) and m.caller_role == "unknown":
                 m.role_unclear = True
             if u.caller_role != "unknown":
                 m.role_unclear = False
             if u.caller_role != "unknown" and u.caller_role != m.caller_role:
                 inferred = "caller_role" in u.guessed
-                if m.caller_role == "representative" and not m.role_guessed:
+                if m.caller_role == "representative" and (not m.role_guessed or acted_as_rep):
                     # Someone who said they were calling for the policyholder cannot
                     # drop the consent requirement by saying otherwise later.
                     note = "Caller first said they were a representative, then said they were the policyholder."

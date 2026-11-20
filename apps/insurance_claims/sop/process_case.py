@@ -195,7 +195,8 @@ class ProcessCasePhase(PolicyBase):
             topics = list(dict.fromkeys(m.pending_topics + u.followup_topics))
             if m.pending_topics:
                 t.trace.memory_used.append(f"follow-up topics {m.pending_topics} noted earlier")
-            t.uncovered = primary == "none" and not topics and u.asks_about_claim
+            switched = t.case_just_resolved and not t.same_case
+            t.uncovered = primary == "none" and not topics and u.asks_about_claim and not switched
             intents = paths_for(primary, extra, bool(topics))
         m.backlog_question = ""
         m.pending_topics = []
