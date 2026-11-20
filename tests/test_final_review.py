@@ -412,3 +412,11 @@ def test_the_policyholders_name_in_the_possessive_is_not_a_yes(convo: Convo):
     reply = convo.say("It's Margaret Chen's policy")
     assert not convo.s.verified and convo.s.memory.caller_role != "policyholder"
     assert_no_leak(reply)
+
+
+def test_being_patient_is_not_mentioning_a_patient(convo: Convo):
+    convo.say("I've been very patient with this. Margaret Chen, 1985-03-15, 4472")
+    assert convo.s.verified and not convo.s.memory.role_unclear
+    other = Convo(convo.agent)
+    other.say("I'm calling about a patient. Margaret Chen, 1985-03-15, 4472")
+    assert other.act == "ROLE_CHECK" and not other.s.verified

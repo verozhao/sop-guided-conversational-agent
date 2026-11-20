@@ -209,8 +209,8 @@ UNDERSTANDING_SCHEMA: dict[str, Any] = {
 # then asks "are you the policyholder yourself?" before the gate opens. Applied to the
 # caller's own words, so it holds whichever engine read the message.
 MENTIONS_OTHER_RE = re.compile(
-    r"\b(?:mother|mom|mum|father|dad|wife|husband|son|daughter|partner|spouse|brother|sister|grandmother|grandfather|"
-    r"grandma|grandpa|aunt|uncle|client|friend|neighbou?r|patient)\b|"
+    r"\b(?:mother|mom|mum|father|dad|wife|husband|son|daughter|spouse|brother|sister|grandmother|grandfather|"
+    r"grandma|grandpa|aunt|uncle)\b|\b(?:my|our|a|the)\s+(?:partner|client|friend|neighbou?r|patient)\b|"  # not "I've been patient"
     r"\b(?:she|he)\s+(?:asked|wants|wanted|needs|can't|cannot|is\s+the|told\s+me)\b|"
     r"\bfor\s+(?:her|him|them)\b|\basked\s+me\s+to\s+call\b",
     re.I,
