@@ -121,6 +121,31 @@ def test_after_verification_mentioning_a_relative_is_not_a_change_of_role(convo:
     assert convo.s.phase != ESCALATED
 
 
+def test_a_first_name_alone_is_asked_about_not_refused_as_unlisted(agent: Agent):
+    # What a model returns for "Yes I'm David, her son": a representative whose name is only "David".
+    readings = [
+        reading(identity={"full_name": "Margaret Chen", "dob": "1985-03-15", "id_last4": "4472"}),
+        reading(caller_role="representative", affirmation="yes", identity={"representative_name": "David"}),
+        reading(caller_role="representative", identity={"representative_name": "David Chen"}),
+    ]
+    c = Convo(agent, llm=ScriptedLLM(on_json=lambda *_: readings.pop(0), on_text=lambda *_: "Thank you."))
+    c.say(MOM_ASKED)
+    c.say("Yes I'm David, her son")
+    assert c.act == "ASK_REP_NAME" and not c.s.verified and c.s.rep_denials == 0
+    c.say("David Chen")
+    assert c.act == "CONSENT_REQUESTED" and not c.s.verified  # he is listed, so the next step is the policyholder's consent
+
+
+def test_typographic_apostrophes_read_like_plain_ones(convo: Convo):
+    convo.say("I\u2019m Margaret Chen, born 1985-03-15, last four 4472. My mom asked me to call.")
+    assert convo.act == "ROLE_CHECK" and convo.s.memory.identity["full_name"] == "Margaret Chen"
+    convo.say("I\u2019m the account holder\u2019s son")
+    assert not convo.s.verified and convo.s.memory.caller_role == "representative"
+    other = Convo(convo.agent)
+    other.run("I\u2019m Margaret Chen, born 1985-03-15, last four 4472. My mom asked me to call.", "yes, it\u2019s mine")
+    assert other.s.verified
+
+
 # ---------------------------------------------------------------- other people's contact details
 
 SOMEONE_ELSES = [

@@ -46,6 +46,12 @@ from .state import ESCALATED, WORKFLOW_PHASES, Session
 from .tools import build_tools
 from .verification import PII_FIELDS, REQUIRED_MATCHES
 
+# Phones and word processors turn ' into a typographic apostrophe. "I’m her son" has to read
+# exactly like "I'm her son", for the rules and for the checks the policy makes on the caller's words.
+PLAIN_PUNCTUATION = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u02bc": "'", "\u201c": '"', "\u201d": '"', "\u2013": "-", "\u2014": "-", "\u00a0": " ",
+})
+
 # The fixtures are dated early 2026 (claims filed January to March, an appeal
 # deadline of 2026-03-18). The demo clock defaults to a date inside that
 # window so deadlines read sensibly. Set SOP_TODAY=real to use the system date.
@@ -94,7 +100,7 @@ class Agent:
 
     def handle(self, session: Session, text: str, llm: LLM | None = None) -> dict[str, Any]:
         started = time.perf_counter()
-        clean = redact_ssn((text or "").strip()[: self.config.max_input_chars])
+        clean = redact_ssn((text or "").strip()[: self.config.max_input_chars].translate(PLAIN_PUNCTUATION))
         today = self.clock()
         session.turn += 1
         trace = TurnTrace(turn=session.turn, phase_before=session.phase, phase_path=[session.phase])

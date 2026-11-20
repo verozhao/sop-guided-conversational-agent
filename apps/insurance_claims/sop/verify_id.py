@@ -496,7 +496,9 @@ class VerifyIdPhase(PolicyBase):
                 rules=REP_GATE_RULES,
                 fixed=True,
             )
-        if not m.representative_name:
+        if len(m.representative_name.split()) < 2:
+            # No name yet, or only a first name ("I'm David, her son"). The list of authorized
+            # representatives holds full names, so a first name is asked about, never refused.
             asked_before = s.pending == "rep_name"
             s.pending = "rep_name"
             facts["representative"] = {**CONSENT_FACTS, "why_the_callers_name_is_needed": REP_NAME_WHY}
